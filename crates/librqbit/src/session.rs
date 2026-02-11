@@ -151,6 +151,7 @@ pub struct Session {
     pub ipv4_only: bool,
     pub peer_limit: Option<usize>,
     client_name_and_version: String,
+    pub peer_pruning_max: Option<usize>,
 }
 
 async fn torrent_from_url(
@@ -282,6 +283,11 @@ pub struct AddTorrentOptions {
 
     /// Max concurrent connected peers.
     pub peer_limit: Option<usize>,
+
+    /// Maximum number of tracked peers per torrent before pruning.
+    /// When set, a periodic task removes excess NotNeeded, Dead, and
+    /// Queued peers to stay within this limit. Live peers are never pruned.
+    pub peer_pruning_max: Option<usize>,
 
     /// This is used to restore the session from serialized state.
     pub preferred_id: Option<usize>,
@@ -467,6 +473,11 @@ pub struct SessionOptions {
     /// Default peer limit per torrent.
     pub peer_limit: Option<usize>,
 
+    /// Maximum number of tracked peers per torrent before pruning.
+    /// When set, excess peers are periodically removed to bound memory.
+    /// Default: None (no pruning).
+    pub peer_pruning_max: Option<usize>,
+
     #[cfg(feature = "disable-upload")]
     pub disable_upload: bool,
 
@@ -502,6 +513,7 @@ impl Default for SessionOptions {
             allowlist_url: None,
             trackers: HashSet::new(),
             peer_limit: None,
+            peer_pruning_max: None,
             #[cfg(feature = "disable-upload")]
             disable_upload: false,
             disable_local_service_discovery: false,
@@ -806,6 +818,7 @@ impl Session {
                 disable_trackers: opts.disable_trackers,
                 peer_limit: opts.peer_limit,
                 client_name_and_version,
+                peer_pruning_max: opts.peer_pruning_max,
 
                 #[cfg(feature = "disable-upload")]
                 _disable_upload: opts.disable_upload,
@@ -1355,6 +1368,7 @@ impl Session {
                     ratelimits: opts.ratelimits,
                     initial_peers: opts.initial_peers.clone().unwrap_or_default(),
                     peer_limit: opts.peer_limit.or(self.peer_limit),
+                    peer_pruning_max: opts.peer_pruning_max.or(self.peer_pruning_max),
                     #[cfg(feature = "disable-upload")]
                     _disable_upload: self._disable_upload,
                 },
