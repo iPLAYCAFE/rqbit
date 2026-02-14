@@ -98,6 +98,10 @@ impl TorrentStorage for FilesystemStorage {
         Ok(f.lock_read()?.set_len(len)?)
     }
 
+    fn file_metadata(&self) -> anyhow::Result<Vec<Option<(std::time::SystemTime, u64)>>> {
+        Ok(self.opened_files.iter().map(|f| f.file_metadata()).collect())
+    }
+
     fn take(&self) -> anyhow::Result<Box<dyn TorrentStorage>> {
         Ok(Box::new(Self {
             opened_files: self

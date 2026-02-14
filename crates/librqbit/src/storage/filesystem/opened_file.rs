@@ -191,6 +191,20 @@ impl OpenedFile {
         let g = parking_lot::RwLockWriteGuard::downgrade(g);
         Ok(RwLockReadGuard::try_map(g, |f| f.fd.as_ref()).ok().unwrap())
     }
+
+    /// Returns the file's (mtime, size) by stat'ing its path.
+    /// Returns None for dummy files (no path set).
+    pub fn file_metadata(&self) -> Option<(std::time::SystemTime, u64)> {
+        let g = self.file.read();
+        let path = &g.path;
+        if path.as_os_str().is_empty() {
+            return None;
+        }
+        std::fs::metadata(path).ok().and_then(|m| {
+            let mtime = m.modified().ok()?;
+            Some((mtime, m.len()))
+        })
+    }
 }
 
 #[cfg(test)]

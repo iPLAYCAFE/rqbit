@@ -151,6 +151,7 @@ pub struct Session {
     pub ipv4_only: bool,
     pub peer_limit: Option<usize>,
     client_name_and_version: String,
+    pub enable_file_integrity_monitor: bool,
 }
 
 async fn torrent_from_url(
@@ -479,6 +480,10 @@ pub struct SessionOptions {
     /// Override the client name and version used in User-Agent headers and
     /// peer extended handshakes. Defaults to "rqbit X.Y.Z".
     pub client_name_and_version: Option<String>,
+
+    /// Enable file integrity monitoring during seeding.
+    /// When enabled, periodically checks file mtime/size to detect external modifications.
+    pub enable_file_integrity_monitor: bool,
 }
 
 impl Default for SessionOptions {
@@ -507,6 +512,7 @@ impl Default for SessionOptions {
             disable_local_service_discovery: false,
             ipv4_only: false,
             client_name_and_version: None,
+            enable_file_integrity_monitor: false,
         }
     }
 }
@@ -806,6 +812,7 @@ impl Session {
                 disable_trackers: opts.disable_trackers,
                 peer_limit: opts.peer_limit,
                 client_name_and_version,
+                enable_file_integrity_monitor: opts.enable_file_integrity_monitor,
 
                 #[cfg(feature = "disable-upload")]
                 _disable_upload: opts.disable_upload,
@@ -1355,6 +1362,7 @@ impl Session {
                     ratelimits: opts.ratelimits,
                     initial_peers: opts.initial_peers.clone().unwrap_or_default(),
                     peer_limit: opts.peer_limit.or(self.peer_limit),
+                    enable_file_integrity_monitor: self.enable_file_integrity_monitor,
                     #[cfg(feature = "disable-upload")]
                     _disable_upload: self._disable_upload,
                 },

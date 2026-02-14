@@ -214,6 +214,10 @@ pub struct TorrentStateLive {
         ChunkInfo,
     )>,
     ratelimits: Limits,
+
+    /// Baseline file metadata captured when torrent goes live.
+    /// Used by the integrity monitor to detect external modifications during seeding.
+    baseline_file_metadata: parking_lot::Mutex<Vec<Option<(std::time::SystemTime, u64)>>>,
 }
 
 impl TorrentStateLive {
@@ -295,6 +299,7 @@ impl TorrentStateLive {
                 .collect(),
             ratelimit_upload_tx,
             ratelimits,
+            baseline_file_metadata: parking_lot::Mutex::new(Vec::new()),
         });
 
         state.spawn(
@@ -338,6 +343,92 @@ impl TorrentStateLive {
             format!("[{}]upload_scheduler", state.shared.id),
             state.clone().task_upload_scheduler(ratelimit_upload_rx),
         );
+
+        // File integrity monitor: detect external modifications during seeding
+        if state.shared.options.enable_file_integrity_monitor {
+            // Capture baseline metadata
+            if let Ok(baseline) = state.files.file_metadata() {
+                *state.baseline_file_metadata.lock() = baseline;
+            }
+
+            let file_count = state.metadata.file_infos.len();
+            state.spawn(
+                debug_span!(parent: state.shared.span.clone(), "file_integrity_monitor"),
+                format!("[{}]file_integrity_monitor", state.shared.id),
+                {
+                    let state = Arc::downgrade(&state);
+                    async move {
+                        let interval = compute_monitor_interval(file_count);
+                        let mut checked_since_idle = false;
+
+                        loop {
+                            tokio::time::sleep(interval).await;
+
+                            let state = match state.upgrade() {
+                                Some(s) => s,
+                                None => return Ok(()),
+                            };
+
+                            // Only monitor finished (seeding) torrents
+                            if !state.is_finished() {
+                                continue;
+                            }
+
+                            // Smart polling: skip idle torrents (no connected peers)
+                            let live_peers = state.peers.stats().live;
+                            if live_peers == 0 {
+                                checked_since_idle = false;
+                                continue;
+                            }
+
+                            // First peer arrived after idle — immediate check
+                            if !checked_since_idle {
+                                checked_since_idle = true;
+                            }
+
+                            // Compare current file metadata against baseline
+                            let current = match state.files.file_metadata() {
+                                Ok(m) => m,
+                                Err(_) => continue,
+                            };
+
+                            let file_names: Vec<String> = state
+                                .metadata
+                                .file_infos
+                                .iter()
+                                .map(|fi| fi.relative_filename.to_string_lossy().to_string())
+                                .collect();
+
+                            let error_msg = {
+                                let baseline = state.baseline_file_metadata.lock();
+                                match check_file_integrity(&baseline, &current, &file_names) {
+                                    IntegrityCheckResult::Ok => None,
+                                    IntegrityCheckResult::FileModified(_, name) => Some(format!(
+                                        "File integrity check failed: '{}' was modified externally. \
+                                         Torrent paused to prevent serving corrupted data. \
+                                         Use Force Recheck to verify and resume.",
+                                        name
+                                    )),
+                                    IntegrityCheckResult::FilesDeleted => Some(
+                                        "File integrity check failed: one or more files were deleted. \
+                                         Torrent paused to prevent serving corrupted data. \
+                                         Use Force Recheck to verify and resume."
+                                            .to_string(),
+                                    ),
+                                }
+                            };
+
+                            if let Some(error_msg) = error_msg {
+                                warn!("{}", error_msg);
+                                let _ = state.on_fatal_error(anyhow::anyhow!("{}", error_msg));
+                                return Ok(());
+                            }
+                        }
+                    }
+                },
+            );
+        }
+
         Ok(state)
     }
 
@@ -2091,4 +2182,159 @@ fn format_peer_client_name(value: &ByteBuf<'_>) -> Option<String> {
     }
 
     Some(client_name)
+}
+
+// === File Integrity Monitor helpers ===
+
+/// Compute the polling interval for the file integrity monitor.
+/// Scales with file count to avoid excessive stat() calls on large torrents.
+pub(crate) fn compute_monitor_interval(file_count: usize) -> Duration {
+    match file_count {
+        0..=50 => Duration::from_secs(60),
+        51..=500 => Duration::from_secs(120),
+        501..=5000 => Duration::from_secs(180),
+        _ => Duration::from_secs(300),
+    }
+}
+
+/// Result of comparing baseline vs current file metadata.
+#[derive(Debug, PartialEq)]
+pub(crate) enum IntegrityCheckResult {
+    Ok,
+    FileModified(usize, String),
+    FilesDeleted,
+}
+
+/// Compare baseline file metadata against current metadata.
+/// Returns the first discrepancy found, or Ok if everything matches.
+pub(crate) fn check_file_integrity(
+    baseline: &[Option<(std::time::SystemTime, u64)>],
+    current: &[Option<(std::time::SystemTime, u64)>],
+    file_names: &[String],
+) -> IntegrityCheckResult {
+    for (idx, (base, cur)) in baseline.iter().zip(current.iter()).enumerate() {
+        if base != cur {
+            let filename = file_names
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| format!("file #{idx}"));
+            return IntegrityCheckResult::FileModified(idx, filename);
+        }
+    }
+
+    if current.len() < baseline.len() {
+        return IntegrityCheckResult::FilesDeleted;
+    }
+
+    IntegrityCheckResult::Ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    // === compute_monitor_interval tests ===
+
+    #[test]
+    fn test_interval_small_torrent() {
+        assert_eq!(compute_monitor_interval(10), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_interval_medium_torrent() {
+        assert_eq!(compute_monitor_interval(200), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_interval_large_torrent() {
+        assert_eq!(compute_monitor_interval(1000), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn test_interval_massive_torrent() {
+        assert_eq!(compute_monitor_interval(10000), Duration::from_secs(300));
+    }
+
+    // === check_file_integrity tests ===
+
+    fn time(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn test_matching_files() {
+        let baseline = vec![Some((time(100), 1024)), Some((time(200), 2048))];
+        let current = vec![Some((time(100), 1024)), Some((time(200), 2048))];
+        let names = vec!["a.txt".into(), "b.txt".into()];
+        assert_eq!(check_file_integrity(&baseline, &current, &names), IntegrityCheckResult::Ok);
+    }
+
+    #[test]
+    fn test_size_change_detected() {
+        let baseline = vec![Some((time(100), 1024))];
+        let current = vec![Some((time(100), 2048))]; // size changed
+        let names = vec!["a.txt".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FileModified(0, "a.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_mtime_change_detected() {
+        let baseline = vec![Some((time(100), 1024))];
+        let current = vec![Some((time(200), 1024))]; // mtime changed
+        let names = vec!["a.txt".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FileModified(0, "a.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_file_deleted() {
+        let baseline = vec![Some((time(100), 1024)), Some((time(200), 2048))];
+        let current = vec![Some((time(100), 1024))]; // second file missing
+        let names = vec!["a.txt".into(), "b.txt".into()];
+        assert_eq!(check_file_integrity(&baseline, &current, &names), IntegrityCheckResult::FilesDeleted);
+    }
+
+    #[test]
+    fn test_second_file_modified() {
+        let baseline = vec![Some((time(100), 1024)), Some((time(200), 2048))];
+        let current = vec![Some((time(100), 1024)), Some((time(300), 2048))]; // second file mtime
+        let names = vec!["a.txt".into(), "b.txt".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FileModified(1, "b.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_none_entries_match() {
+        let baseline = vec![None, Some((time(200), 2048))];
+        let current = vec![None, Some((time(200), 2048))];
+        let names = vec!["padding".into(), "b.txt".into()];
+        assert_eq!(check_file_integrity(&baseline, &current, &names), IntegrityCheckResult::Ok);
+    }
+
+    #[test]
+    fn test_file_appearing() {
+        let baseline = vec![None];
+        let current = vec![Some((time(100), 1024))]; // file appeared
+        let names = vec!["a.txt".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FileModified(0, "a.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_empty_baseline_and_current() {
+        let baseline: Vec<Option<(SystemTime, u64)>> = vec![];
+        let current: Vec<Option<(SystemTime, u64)>> = vec![];
+        let names: Vec<String> = vec![];
+        assert_eq!(check_file_integrity(&baseline, &current, &names), IntegrityCheckResult::Ok);
+    }
 }
