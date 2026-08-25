@@ -3,8 +3,9 @@
 This is a customized fork of [rqbit](https://github.com/ikatson/rqbit), focused on providing a **production-grade Windows Desktop experience** with advanced torrent creation and management features.
 
 > **Fork Point**: [`v9.0.1`](https://github.com/ikatson/rqbit/releases/tag/v9.0.1) (`a499d2f2`) on upstream `main`
-> **Delta**: 13 commits ahead of `v9.0.1`, 91 files changed, +8,309 / −1,148 lines
+> **Delta**: **1 squashed commit** on `main` above `v9.0.1` (see `git diff upstream/main...main --stat`)
 > **Repo**: [github.com/iPLAYCAFE/rqbit](https://github.com/iPLAYCAFE/rqbit) (GitHub fork of [ikatson/rqbit](https://github.com/ikatson/rqbit))
+> **Agent context**: [`AGENTS.md`](AGENTS.md) · [`README.feature_strategy.md`](README.feature_strategy.md)
 
 ---
 

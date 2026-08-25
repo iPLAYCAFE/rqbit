@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **iPLAYCAFE fork:** Read `AGENTS.md` first for remotes, branch model, CI, branch protection, and fork-only features. Strategy details: `README.feature_strategy.md`. Product delta: `README.md`.
+
 ## Project Overview
 
 rqbit is a BitTorrent client written in Rust with an HTTP API, Web UI, and desktop app (Tauri). The library (`librqbit`) can also be used standalone.
