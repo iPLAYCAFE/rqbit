@@ -178,7 +178,8 @@ cargo check && cargo clippy --all-targets
 # collapse fork delta back to one commit:
 git reset --soft upstream/main
 git commit -m "feat(fork): iPLAYCAFE enhancements on <upstream-tag>"
-git push --force-with-lease origin main
+# main is PR-protected — push to a sync branch and open PR to main:
+git push -u origin HEAD:fork/sync-<upstream-tag>
 ```
 
 `feat/*` branches stay **one commit each** for upstream PRs; do not squash them into `main`.
@@ -189,13 +190,12 @@ When you choose to sync (no scheduled automation):
 
 ```bash
 git fetch upstream --tags
-git checkout main
+git checkout main && git pull origin main
 git rebase upstream/main
-# resolve conflicts, then:
-cargo check
-cargo clippy --all-targets
-git push origin main
+# resolve conflicts, then verify and re-squash (see "Commit hygiene on main" above)
 ```
+
+After re-squash, open a PR from `fork/sync-<tag>` → `main` (or temporarily loosen branch protection for one force-push).
 
 Feature branches intended for upstream PRs should be rebased onto `upstream/main` (not fork `main`), one commit each, then force-pushed to `origin`.
 
