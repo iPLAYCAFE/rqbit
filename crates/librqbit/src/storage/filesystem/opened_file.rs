@@ -88,14 +88,69 @@ impl OurFileExt for File {
     fn pwrite_all(&self, offset: u64, buf: &[u8]) -> anyhow::Result<()> {
         use std::os::windows::fs::FileExt;
 
+        /// Windows OS error 5: ERROR_ACCESS_DENIED.
+        /// Often transient during real-time antivirus scanning (Windows Defender),
+        /// NTFS journal updates, or sparse block allocation under heavy I/O.
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const MAX_RETRIES: u32 = 3;
+        const BACKOFF_BASE_MS: u64 = 100;
+
         let mut remaining = buf.len();
         let mut buf = buf;
         let mut offset = offset;
         while remaining > 0 {
-            let written = self.seek_write(&buf[..remaining], offset)?;
-            remaining -= written;
-            offset += written as u64;
-            buf = &buf[written..];
+            match self.seek_write(&buf[..remaining], offset) {
+                Ok(written) => {
+                    remaining -= written;
+                    offset += written as u64;
+                    buf = &buf[written..];
+                }
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                    let mut last_err = e;
+                    let mut succeeded = false;
+
+                    for attempt in 1..=MAX_RETRIES {
+                        let delay_ms = BACKOFF_BASE_MS * attempt as u64;
+                        tracing::warn!(
+                            attempt,
+                            max_retries = MAX_RETRIES,
+                            remaining_bytes = remaining,
+                            offset,
+                            delay_ms,
+                            "pwrite_all: Access Denied (os error 5), retrying"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+
+                        match self.seek_write(&buf[..remaining], offset) {
+                            Ok(written) => {
+                                tracing::info!(
+                                    attempt,
+                                    written,
+                                    "pwrite_all: retry succeeded after Access Denied"
+                                );
+                                remaining -= written;
+                                offset += written as u64;
+                                buf = &buf[written..];
+                                succeeded = true;
+                                break;
+                            }
+                            Err(retry_err) => {
+                                last_err = retry_err;
+                            }
+                        }
+                    }
+
+                    if !succeeded {
+                        return Err(anyhow::Error::from(last_err).context(format!(
+                            "pwrite_all: Access Denied persisted after {MAX_RETRIES} retries \
+                             (remaining={remaining} bytes, offset={offset}). \
+                             Possible causes: antivirus real-time scanning, \
+                             NTFS metadata contention, or exclusive file lock by another process"
+                        )));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         Ok(())
     }
@@ -130,10 +185,12 @@ impl DerefMut for OpenedFileLocked {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct OpenedFile {
     file: RwLock<OpenedFileLocked>,
 }
 
+#[allow(dead_code)]
 impl OpenedFile {
     pub fn new(path: PathBuf, f: File) -> Self {
         Self {

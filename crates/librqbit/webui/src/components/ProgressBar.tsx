@@ -19,7 +19,7 @@ export const ProgressBar: React.FC<{
   return (
     <div className={`w-full bg-divider rounded-full mb-1 ${classNames}`}>
       <div
-        className={`text-sm font-medium transition-all text-center leading-none py-0.5 px-2 rounded-full ${variantClassName} ${
+        className={`text-sm font-medium transition-[width,background-color] duration-300 text-center leading-none py-0.5 px-2 rounded-full ${variantClassName} ${
           now < 1 && "bg-transparent"
         }`}
         style={{ width: `${now}%` }}

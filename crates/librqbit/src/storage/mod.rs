@@ -30,6 +30,9 @@ pub mod examples;
 #[cfg(feature = "storage_middleware")]
 pub mod middleware;
 
+use std::path::PathBuf;
+use std::time::SystemTime;
+
 use std::{
     any::{Any, TypeId},
     io::IoSlice,
@@ -168,6 +171,24 @@ pub trait TorrentStorage: Send + Sync {
     fn on_piece_completed(&self, _piece_index: ValidPieceIndex) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// List files on disk that are NOT part of the torrent's file list.
+    /// Returns paths relative to the torrent output directory.
+    /// Default implementation returns an error (not supported).
+    fn list_extra_files(
+        &self,
+        _file_infos: &[crate::file_info::FileInfo],
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        anyhow::bail!("list_extra_files not supported by this storage backend")
+    }
+
+    /// Returns (mtime, size) for each file in the torrent.
+    /// Used by the integrity monitor to detect external modifications during seeding.
+    /// Files that don't exist or can't be stat'd return None.
+    /// Default implementation returns an error (not supported by non-filesystem backends).
+    fn file_metadata(&self) -> anyhow::Result<Vec<Option<(SystemTime, u64)>>> {
+        anyhow::bail!("file_metadata not supported by this storage backend")
+    }
 }
 
 impl<U: TorrentStorage + ?Sized> TorrentStorage for Box<U> {
@@ -205,5 +226,16 @@ impl<U: TorrentStorage + ?Sized> TorrentStorage for Box<U> {
 
     fn on_piece_completed(&self, piece_id: ValidPieceIndex) -> anyhow::Result<()> {
         (**self).on_piece_completed(piece_id)
+    }
+
+    fn list_extra_files(
+        &self,
+        file_infos: &[crate::file_info::FileInfo],
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        (**self).list_extra_files(file_infos)
+    }
+
+    fn file_metadata(&self) -> anyhow::Result<Vec<Option<(SystemTime, u64)>>> {
+        (**self).file_metadata()
     }
 }

@@ -9,6 +9,7 @@ import {
   ErrorDetails,
   SessionStats,
   PeerStatsSnapshot,
+  CreateTorrentTask,
 } from "rqbit-webui/src/api-types";
 
 import { InvokeArgs, invoke } from "@tauri-apps/api/core";
@@ -87,10 +88,7 @@ export const makeAPI = (configuration: RqbitDesktopConfig): RqbitAPI => {
 
   return {
     getStreamLogsUrl: () => {
-      if (!httpBase) {
-        return null;
-      }
-      return `${httpBase}/stream_logs`;
+      return null; // Desktop uses Tauri events (log_line) instead of HTTP streaming
     },
     listTorrents: async function (): Promise<ListTorrentsResponse> {
       return await invokeAPI<ListTorrentsResponse>("torrents_list");
@@ -126,6 +124,16 @@ export const makeAPI = (configuration: RqbitDesktopConfig): RqbitAPI => {
       return await invokeAPI<AddTorrentResponse>("torrent_create_from_url", {
         url: data,
         opts: opts ?? {},
+      });
+    },
+    createTorrent: async function (
+      path: string,
+      opts?: { name?: string; trackers?: string[] },
+    ): Promise<AddTorrentResponse> {
+      return await invokeAPI<AddTorrentResponse>("torrent_create", {
+        path,
+        name: opts?.name,
+        trackers: opts?.trackers,
       });
     },
     updateOnlyFiles: function (id, files): Promise<void> {
@@ -165,6 +173,43 @@ export const makeAPI = (configuration: RqbitDesktopConfig): RqbitAPI => {
     setLimits: (_limits: LimitsConfig) => {
       // Desktop manages rate limits via config change, not this API
       return Promise.resolve();
+    },
+    createTorrentTask: async function (
+      path: string,
+      opts?: { name?: string; trackers?: string[] },
+    ): Promise<number> {
+      let res = await invokeAPI<{ id: number }>("torrent_create_task_enqueue", {
+        path,
+        name: opts?.name,
+        trackers: opts?.trackers,
+      });
+      return res.id;
+    },
+    listCreateTorrentTasks: async function (): Promise<CreateTorrentTask[]> {
+      return await invokeAPI<CreateTorrentTask[]>("torrent_create_task_list");
+    },
+    cancelCreateTorrentTask: async function (id: number): Promise<void> {
+      return await invokeAPI<void>("torrent_create_task_cancel", { id });
+    },
+    deleteCreateTorrentTask: async function (id: number): Promise<void> {
+      return await invokeAPI<void>("torrent_create_task_delete", { id });
+    },
+    listExtraFiles: async function (
+      index: number,
+    ): Promise<{ extra_files: string[] }> {
+      return await invokeAPI<{ extra_files: string[] }>(
+        "torrent_list_extra_files",
+        { id: index },
+      );
+    },
+    removeExtraFiles: async function (
+      index: number,
+      files: string[],
+    ): Promise<{ removed: number; failed: number }> {
+      return await invokeAPI<{ removed: number; failed: number }>(
+        "torrent_delete_extra_files",
+        { id: index, files },
+      );
     },
   };
 };

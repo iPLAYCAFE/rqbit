@@ -1,42 +1,63 @@
 import { create } from "zustand";
 import { TorrentDetails, TorrentListItem } from "../api-types";
 
-function deepEqual(obj1: any, obj2: any): boolean {
-  // 1. Same reference or same primitive value
-  if (obj1 === obj2) return true;
+// Specialized comparison for TorrentListItem to avoid expensive deep equality checks
+function torrentsEqual(a: TorrentListItem, b: TorrentListItem): boolean {
+  if (a === b) return true;
+  if (a.id !== b.id) return false;
+  if (a.info_hash !== b.info_hash) return false;
+  if (a.name !== b.name) return false;
+  if (a.output_folder !== b.output_folder) return false;
+  if (a.total_pieces !== b.total_pieces) return false;
 
-  // 2. Handle nulls and different types
-  if (
-    obj1 === null ||
-    obj2 === null ||
-    typeof obj1 !== "object" ||
-    typeof obj2 !== "object"
-  ) {
-    return false;
-  }
+  // Stats comparison
+  const s1 = a.stats;
+  const s2 = b.stats;
 
-  // 3. Handle Arrays specifically
-  if (Array.isArray(obj1) !== Array.isArray(obj2)) return false;
+  if (s1 === s2) return true;
+  if (!s1 || !s2) return false;
 
-  const keys1 = Object.keys(obj1);
-  const keys2 = Object.keys(obj2);
+  if (s1.state !== s2.state) return false;
+  if (s1.error !== s2.error) return false;
+  if (s1.progress_bytes !== s2.progress_bytes) return false;
+  if (s1.finished !== s2.finished) return false;
+  if (s1.total_bytes !== s2.total_bytes) return false;
+  if (s1.total_fetched_bytes !== s2.total_fetched_bytes) return false;
+  if (s1.added_at !== s2.added_at) return false;
+  if (s1.last_activity !== s2.last_activity) return false;
 
-  // 4. Optimization: different number of properties means they aren't equal
-  if (keys1.length !== keys2.length) return false;
+  // Live stats comparison
+  const l1 = s1.live;
+  const l2 = s2.live;
 
-  // 5. Recursive check for every key
-  for (const key of keys1) {
-    if (!keys2.includes(key) || !deepEqual(obj1[key], obj2[key])) {
-      return false;
-    }
+  if (l1 === l2) return true;
+  if (!l1 || !l2) return false;
+
+  // Compare high-frequency changing fields
+  // Compare high-frequency changing fields
+  // Use human_readable to avoid re-renders on floating point noise
+  if (l1.download_speed.human_readable !== l2.download_speed.human_readable) return false;
+  if (l1.upload_speed.human_readable !== l2.upload_speed.human_readable) return false;
+  
+  if (l1.snapshot.uploaded_bytes !== l2.snapshot.uploaded_bytes) return false;
+  if (l1.snapshot.fetched_bytes !== l2.snapshot.fetched_bytes) return false;
+  
+  // Compare peer stats
+  const p1 = l1.snapshot.peer_stats;
+  const p2 = l2.snapshot.peer_stats;
+  // CompactView only displays live/seen
+  if (p1.live !== p2.live || p1.seen !== p2.seen) return false;
+
+  // Compare ETA
+  const t1 = l1.time_remaining;
+  const t2 = l2.time_remaining;
+  if (t1 !== t2) { // check ref
+      if (!t1 || !t2) return false;
+      // assuming time_remaining structure is simple
+      if (t1.human_readable !== t2.human_readable) return false;
   }
 
   return true;
-}
-
-// Deep compare two torrents
-function torrentsEqual(a: TorrentListItem, b: TorrentListItem): boolean {
-  return deepEqual(a, b);
 }
 
 export interface TorrentStore {

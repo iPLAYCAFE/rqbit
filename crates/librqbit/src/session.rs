@@ -13,6 +13,7 @@ use std::{
 
 use crate::{
     ApiError, CreateTorrentOptions, FileInfos, ManagedTorrent, ManagedTorrentShared,
+    TorrentCreationManager,
     api::TorrentIdOrHash,
     api_error::WithStatus,
     bitv_factory::{BitVFactory, NonPersistentBitVFactory},
@@ -151,6 +152,14 @@ pub struct Session {
     pub ipv4_only: bool,
     pub peer_limit: Option<usize>,
     client_name_and_version: String,
+    pub kill_locking_processes: bool,
+    pub sync_extra_files: bool,
+    pub skip_hash_check: bool,
+    pub permissive_file_opening: Option<bool>,
+    pub enable_file_integrity_monitor: bool,
+    pub peer_pruning_max: Option<usize>,
+
+    pub torrent_creation_manager: Arc<TorrentCreationManager>,
 }
 
 async fn torrent_from_url(
@@ -291,6 +300,27 @@ pub struct AddTorrentOptions {
 
     // Custom trackers
     pub trackers: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub skip_initial_check: bool,
+
+    #[serde(default)]
+    pub kill_locking_processes: Option<bool>,
+
+    #[serde(default)]
+    pub sync_extra_files: Option<bool>,
+
+    #[serde(default)]
+    pub permissive_file_opening: Option<bool>,
+
+    pub added_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub total_fetched_bytes: Option<u64>,
+    pub last_activity: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Set to true when restoring from session persistence.
+    /// Suppresses kill_locking_processes and sync_extra_files during init.
+    #[serde(default)]
+    pub is_restoring: bool,
 }
 
 pub struct ListOnlyResponse {
@@ -479,6 +509,24 @@ pub struct SessionOptions {
     /// Override the client name and version used in User-Agent headers and
     /// peer extended handshakes. Defaults to "rqbit X.Y.Z".
     pub client_name_and_version: Option<String>,
+
+    pub kill_locking_processes: bool,
+    pub sync_extra_files: bool,
+    pub skip_hash_check: bool,
+    pub permissive_file_opening: Option<bool>,
+
+    /// Enable the file integrity monitor. When enabled, rqbit will periodically
+    /// check if torrent files have been modified externally while seeding, and
+    /// auto-pause the torrent to prevent serving corrupted data.
+    /// Also enables startup integrity validation when skip_hash_check is on.
+    /// Default: false (disabled).
+    pub enable_file_integrity_monitor: bool,
+
+    /// Maximum number of peers to keep per torrent before pruning.
+    /// When the peer count exceeds this, the pruner removes NotNeeded peers
+    /// first, then scores Dead/Queued peers by connection quality.
+    /// Default: 2000.
+    pub peer_pruning_max: Option<usize>,
 }
 
 impl Default for SessionOptions {
@@ -507,6 +555,12 @@ impl Default for SessionOptions {
             disable_local_service_discovery: false,
             ipv4_only: false,
             client_name_and_version: None,
+            kill_locking_processes: false,
+            sync_extra_files: false,
+            skip_hash_check: false,
+            permissive_file_opening: None,
+            enable_file_integrity_monitor: false,
+            peer_pruning_max: None,
         }
     }
 }
@@ -777,6 +831,7 @@ impl Session {
                 }
             };
 
+            let creation_cancel = token.child_token();
             let session = Arc::new(Self {
                 persistence,
                 bitv_factory,
@@ -812,7 +867,23 @@ impl Session {
                 blocklist,
                 allowlist,
                 lsd,
+                kill_locking_processes: opts.kill_locking_processes,
+                sync_extra_files: opts.sync_extra_files,
+                skip_hash_check: opts.skip_hash_check,
+                permissive_file_opening: opts.permissive_file_opening,
+                enable_file_integrity_monitor: opts.enable_file_integrity_monitor,
+                peer_pruning_max: opts.peer_pruning_max,
+                // TODO: Propagate this to storage factory if it needs it globally?
+                // Actually, clean storage factory initialization is done per torrent usually,
+                // but we need to ensure the SessionDefaults are passed down.
+                torrent_creation_manager: TorrentCreationManager::new(
+                    spawner.clone(),
+                    creation_cancel,
+                ),
             });
+            session
+                .torrent_creation_manager
+                .set_session(Arc::downgrade(&session));
 
             if let Some(mut listen) = listen_result {
                 if let Some(tcp) = listen.tcp_socket.take() {
@@ -882,7 +953,11 @@ impl Session {
                                     let (id, st) = st?;
                                     let span = add_torrent_span(st.info_hash());
                                     let (add_torrent, mut opts) = st.into_add_torrent()?;
+                                    if session.skip_hash_check {
+                                        opts.skip_initial_check = true;
+                                    }
                                     opts.preferred_id = Some(id);
+                                    opts.is_restoring = true;
                                     let fut = session.add_torrent(add_torrent, Some(opts));
                                     let fut = fut.instrument(span);
                                     futs.push(fut);
@@ -1335,6 +1410,38 @@ impl Session {
                 return Ok(AddTorrentResponse::AlreadyManaged(id, handle));
             }
 
+            // Check for duplicate output_folder path.
+            // This catches cases where folder content changed between creations
+            // (producing different info_hashes) but the path is still the same.
+            {
+                let output_folder_norm = output_folder
+                    .to_string_lossy()
+                    .trim_end_matches(['/', '\\'])
+                    .to_lowercase();
+
+                if let Some((eid, handle)) = g.torrents.iter().find_map(|(eid, t)| {
+                    let existing_path = t
+                        .shared()
+                        .options
+                        .output_folder
+                        .to_string_lossy()
+                        .trim_end_matches(['/', '\\'])
+                        .to_lowercase();
+                    if existing_path == output_folder_norm {
+                        Some((*eid, t.clone()))
+                    } else {
+                        None
+                    }
+                }) {
+                    warn!(
+                        existing_id = eid,
+                        path = %output_folder.display(),
+                        "torrent with same output folder already exists, skipping"
+                    );
+                    return Ok(AddTorrentResponse::AlreadyManaged(eid, handle));
+                }
+            }
+
             let span = debug_span!(parent: self.rs(), "torrent", id);
             let peer_opts = self.merge_peer_opts(opts.peer_opts);
             let metadata = Arc::new(metadata);
@@ -1352,9 +1459,20 @@ impl Session {
                     peer_read_write_timeout: peer_opts.read_write_timeout,
                     allow_overwrite: opts.overwrite,
                     output_folder,
+                    kill_locking_processes: opts
+                        .kill_locking_processes
+                        .unwrap_or(self.kill_locking_processes),
+                    sync_extra_files: opts.sync_extra_files.unwrap_or(self.sync_extra_files),
+                    is_restoring: opts.is_restoring,
+                    _skip_hash_check: self.skip_hash_check,
+                    enable_file_integrity_monitor: self.enable_file_integrity_monitor,
+                    permissive_file_opening: opts
+                        .permissive_file_opening
+                        .or(self.permissive_file_opening),
                     ratelimits: opts.ratelimits,
                     initial_peers: opts.initial_peers.clone().unwrap_or_default(),
                     peer_limit: opts.peer_limit.or(self.peer_limit),
+                    peer_pruning_max: self.peer_pruning_max,
                     #[cfg(feature = "disable-upload")]
                     _disable_upload: self._disable_upload,
                 },
@@ -1362,6 +1480,7 @@ impl Session {
                 session: Arc::downgrade(self),
                 magnet_name: name,
                 client_name_and_version: self.client_name_and_version.clone(),
+                added_at: opts.added_at.or_else(|| Some(chrono::Utc::now())),
             });
 
             let initializing = Arc::new(TorrentStateInitializing::new(
@@ -1371,12 +1490,15 @@ impl Session {
                 self.spawner
                     .block_in_place(|| minfo.storage_factory.create_and_init(&minfo, &metadata))?,
                 false,
+                opts.skip_initial_check,
             ));
             let handle = Arc::new(ManagedTorrent {
                 locked: RwLock::new(ManagedTorrentLocked {
                     paused: opts.paused,
                     state: ManagedTorrentState::Initializing(initializing),
                     only_files,
+                    total_fetched_bytes: opts.total_fetched_bytes.unwrap_or(0),
+                    last_activity: opts.last_activity,
                 }),
                 state_change_notify: Notify::new(),
                 shared: minfo,
@@ -1683,7 +1805,7 @@ impl Session {
     pub async fn create_and_serve_torrent(
         self: &Arc<Self>,
         path: &Path,
-        opts: CreateTorrentOptions<'_>,
+        opts: CreateTorrentOptions,
     ) -> Result<(CreateTorrentResult, ManagedTorrentHandle), ApiError> {
         if !path.exists() {
             return Err(ApiError::from((
@@ -1704,6 +1826,7 @@ impl Session {
                 Some(AddTorrentOptions {
                     paused: false,
                     overwrite: true,
+                    skip_initial_check: true,
                     output_folder: Some(
                         torrent
                             .output_folder

@@ -23,6 +23,7 @@ interface RqbitDesktopConfigPersistence {
   disable: boolean;
   folder: PathLike;
   fastresume: boolean;
+  skip_hash_check?: boolean;
 }
 
 interface RqbitDesktopConfigHttpApi {
@@ -30,6 +31,7 @@ interface RqbitDesktopConfigHttpApi {
   listen_addr: SocketAddr;
   read_only: boolean;
   cors_enable_all: boolean;
+  basic_auth?: string | null;
 }
 
 interface RqbitDesktopConfigUpnp {
@@ -37,6 +39,13 @@ interface RqbitDesktopConfigUpnp {
 
   enable_server: boolean;
   server_friendly_name: string;
+}
+
+interface RqbitDesktopConfigFeatures {
+  kill_locking_processes: boolean;
+  sync_extra_files: boolean;
+  permissive_file_opening: boolean;
+  enable_file_integrity_monitor: boolean;
 }
 
 export interface LimitsConfig {
@@ -52,7 +61,9 @@ export interface RqbitDesktopConfig {
   upnp: RqbitDesktopConfigUpnp;
   persistence: RqbitDesktopConfigPersistence;
   http_api: RqbitDesktopConfigHttpApi;
+  features: RqbitDesktopConfigFeatures;
   ratelimits: LimitsConfig;
+  concurrent_init_limit: number;
 }
 
 export interface CurrentDesktopState {

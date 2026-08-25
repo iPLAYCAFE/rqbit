@@ -11,6 +11,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     WithStatus, WithStatusError,
     api_error::ApiError,
+    create_torrent_file::CreateTorrentOptions,
+    create_torrent_queue::CreateTorrentTask,
     session::{
         AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyResponse, Session, TorrentId,
     },
@@ -21,6 +23,14 @@ use crate::{
     },
     type_aliases::BF,
 };
+use std::path::{Path, PathBuf};
+
+/// Normalize a path to use native OS separators (backslash on Windows).
+/// PathBuf::to_string_lossy() can produce mixed separators like `E:/Web\Microsoft Edge`.
+fn normalize_path_string(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    s.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
 
 #[cfg(feature = "tracing-subscriber-utils")]
 use crate::tracing_subscriber_config_utils::LineBroadcast;
@@ -217,21 +227,23 @@ impl Api {
                         id: Some(id),
                         info_hash: mgr.shared().info_hash.as_string(),
                         name: mgr.name(),
-                        output_folder: mgr
-                            .shared()
-                            .options
-                            .output_folder
-                            .to_string_lossy()
-                            .into_owned(),
+                        output_folder: normalize_path_string(&mgr.shared().options.output_folder),
                         total_pieces,
 
                         // These will be filled in /details and /stats endpoints
                         files: None,
                         stats: None,
+                        trackers: None,
                     };
                     if opts.with_stats {
-                        r.stats = Some(mgr.stats());
+                        let mut stats = mgr.stats();
+                        // Optimization: Don't send file_progress in list view, it's too heavy
+                        stats.file_progress.clear();
+                        r.stats = Some(stats);
                     }
+                    // Optimization: Don't send files/trackers in list view, they're too heavy for polling
+                    r.files = None;
+                    r.trackers = None;
                     r
                 })
                 .collect()
@@ -243,13 +255,13 @@ impl Api {
         let handle = self.mgr_handle(idx)?;
         let info_hash = handle.shared().info_hash;
         let only_files = handle.only_files();
-        let output_folder = handle
+        let output_folder = normalize_path_string(&handle.shared().options.output_folder);
+        let trackers = handle
             .shared()
-            .options
-            .output_folder
-            .to_string_lossy()
-            .into_owned()
-            .to_string();
+            .trackers
+            .iter()
+            .map(|u| u.to_string())
+            .collect();
         make_torrent_details(
             Some(handle.id()),
             &info_hash,
@@ -257,6 +269,7 @@ impl Api {
             handle.name().as_deref(),
             only_files.as_deref(),
             output_folder,
+            Some(trackers),
         )
     }
 
@@ -392,24 +405,23 @@ impl Api {
                     handle.metadata.load().as_ref().map(|r| &r.info),
                     handle.name().as_deref(),
                     handle.only_files().as_deref(),
-                    handle
-                        .shared()
-                        .options
-                        .output_folder
-                        .to_string_lossy()
-                        .into_owned(),
+                    normalize_path_string(&handle.shared().options.output_folder),
+                    Some(
+                        handle
+                            .shared()
+                            .trackers
+                            .iter()
+                            .map(|u| u.to_string())
+                            .collect(),
+                    ),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
                     id: Some(id),
                     details,
                     seen_peers: None,
-                    output_folder: handle
-                        .shared()
-                        .options
-                        .output_folder
-                        .to_string_lossy()
-                        .into_owned(),
+                    output_folder: normalize_path_string(&handle.shared().options.output_folder),
+                    already_managed: true,
                 }
             }
             AddTorrentResponse::ListOnly(ListOnlyResponse {
@@ -421,7 +433,7 @@ impl Api {
                 ..
             }) => ApiAddTorrentResponse {
                 id: None,
-                output_folder: output_folder.to_string_lossy().into_owned(),
+                output_folder: normalize_path_string(&output_folder),
                 seen_peers: Some(seen_peers),
                 details: make_torrent_details(
                     None,
@@ -429,9 +441,11 @@ impl Api {
                     Some(&info),
                     None,
                     only_files.as_deref(),
-                    output_folder.to_string_lossy().into_owned().to_string(),
+                    normalize_path_string(&output_folder),
+                    None,
                 )
                 .context("error making torrent details")?,
+                already_managed: false,
             },
             AddTorrentResponse::Added(id, handle) => {
                 let details = make_torrent_details(
@@ -440,24 +454,23 @@ impl Api {
                     handle.metadata.load().as_ref().map(|r| &r.info),
                     handle.name().as_deref(),
                     handle.only_files().as_deref(),
-                    handle
-                        .shared()
-                        .options
-                        .output_folder
-                        .to_string_lossy()
-                        .into_owned(),
+                    normalize_path_string(&handle.shared().options.output_folder),
+                    Some(
+                        handle
+                            .shared()
+                            .trackers
+                            .iter()
+                            .map(|u| u.to_string())
+                            .collect(),
+                    ),
                 )
                 .context("error making torrent details")?;
                 ApiAddTorrentResponse {
                     id: Some(id),
                     details,
                     seen_peers: None,
-                    output_folder: handle
-                        .shared()
-                        .options
-                        .output_folder
-                        .to_string_lossy()
-                        .into_owned(),
+                    output_folder: normalize_path_string(&handle.shared().options.output_folder),
+                    already_managed: false,
                 }
             }
         };
@@ -515,6 +528,71 @@ impl Api {
         let mgr = self.mgr_handle(idx)?;
         Ok(mgr.stream(file_id).await?)
     }
+
+    // Create Torrent Queue Methods
+    pub fn api_create_torrent_enqueue(
+        &self,
+        path: PathBuf,
+        options: CreateTorrentOptions,
+    ) -> Result<usize> {
+        Ok(self
+            .session
+            .torrent_creation_manager
+            .enqueue(path, options)?)
+    }
+
+    pub fn api_create_torrent_list(
+        &self,
+    ) -> Result<Vec<Arc<parking_lot::RwLock<CreateTorrentTask>>>> {
+        Ok(self.session.torrent_creation_manager.list())
+    }
+
+    pub fn api_create_torrent_cancel(&self, id: usize) -> Result<EmptyJsonResponse> {
+        self.session
+            .torrent_creation_manager
+            .cancel(id)
+            .context("error cancelling task")?;
+        Ok(Default::default())
+    }
+
+    pub fn api_create_torrent_delete(&self, id: usize) -> Result<EmptyJsonResponse> {
+        self.session.torrent_creation_manager.cleanup(id);
+        Ok(Default::default())
+    }
+
+    /// List files in the torrent's output directory that are not part of the torrent manifest.
+    pub fn api_list_extra_files(&self, idx: TorrentIdOrHash) -> Result<ListExtraFilesResponse> {
+        use crate::torrent_state::ManagedTorrentState;
+
+        let handle = self.mgr_handle(idx)?;
+        let file_infos = handle.with_metadata(|meta| meta.file_infos.clone())?;
+        let extra_files = handle.with_state(|state| -> anyhow::Result<Vec<String>> {
+            let files_storage = match state {
+                ManagedTorrentState::Paused(p) => &p.files,
+                ManagedTorrentState::Live(l) => &l.files,
+                ManagedTorrentState::Initializing(i) => &i.files,
+                _ => anyhow::bail!("torrent is not in a state that supports listing extra files"),
+            };
+            let paths = files_storage.list_extra_files(&file_infos)?;
+            Ok(paths
+                .into_iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect())
+        })?;
+        Ok(ListExtraFilesResponse { extra_files })
+    }
+
+    /// Delete specific extra files from the torrent's output directory.
+    pub fn api_delete_extra_files(
+        &self,
+        idx: TorrentIdOrHash,
+        files: Vec<String>,
+    ) -> Result<DeleteExtraFilesResponse> {
+        let handle = self.mgr_handle(idx)?;
+        let output_folder = &handle.shared().options.output_folder;
+        let (removed, failed) = crate::sync_utils::delete_extra_files(output_folder, &files);
+        Ok(DeleteExtraFilesResponse { removed, failed })
+    }
 }
 
 #[derive(Serialize)]
@@ -535,6 +613,17 @@ pub struct TorrentDetailsResponseFile {
 pub struct EmptyJsonResponse {}
 
 #[derive(Serialize, Deserialize)]
+pub struct ListExtraFilesResponse {
+    pub extra_files: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeleteExtraFilesResponse {
+    pub removed: usize,
+    pub failed: usize,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct TorrentDetailsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<usize>,
@@ -549,6 +638,8 @@ pub struct TorrentDetailsResponse {
     pub files: Option<Vec<TorrentDetailsResponseFile>>,
     #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
     pub stats: Option<TorrentStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trackers: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -557,6 +648,8 @@ pub struct ApiAddTorrentResponse {
     pub details: TorrentDetailsResponse,
     pub output_folder: String,
     pub seen_peers: Option<Vec<SocketAddr>>,
+    #[serde(default)]
+    pub already_managed: bool,
 }
 
 fn make_torrent_details(
@@ -566,6 +659,7 @@ fn make_torrent_details(
     name: Option<&str>,
     only_files: Option<&[usize]>,
     output_folder: String,
+    trackers: Option<Vec<String>>,
 ) -> Result<TorrentDetailsResponse> {
     let files = match info {
         Some(info) => info
@@ -597,6 +691,7 @@ fn make_torrent_details(
         output_folder,
         total_pieces,
         stats: None,
+        trackers,
     })
 }
 

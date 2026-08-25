@@ -10,15 +10,49 @@ use bytes::Bytes;
 use librqbit_core::Id20;
 use librqbit_core::magnet::Magnet;
 use librqbit_core::torrent_metainfo::{TorrentMetaV1File, TorrentMetaV1Info, TorrentMetaV1Owned};
+use serde::{Deserialize, Serialize};
 use sha1w::ISha1;
 
 use crate::spawn_utils::BlockingSpawner;
 
-#[derive(Debug, Clone, Default)]
-pub struct CreateTorrentOptions<'a> {
-    pub name: Option<&'a str>,
+/// Progress report for torrent creation.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateTorrentProgress {
+    /// Total bytes to hash across all input files.
+    pub total_bytes: u64,
+    /// Bytes hashed so far.
+    pub hashed_bytes: u64,
+    /// Number of files discovered.
+    pub total_files: usize,
+    /// Number of files fully hashed.
+    pub hashed_files: usize,
+}
+
+impl CreateTorrentProgress {
+    pub fn progress_pct(&self) -> f64 {
+        if self.total_bytes == 0 {
+            return 0.0;
+        }
+        self.hashed_bytes as f64 / self.total_bytes as f64 * 100.0
+    }
+}
+
+/// Options for creating a torrent.
+///
+/// Uses owned `String` instead of `&str` so the struct is `'static` and can
+/// be sent across async boundaries (e.g. Tauri commands, API handlers) without
+/// needing lifetime gymnastics.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct CreateTorrentOptions {
+    pub name: Option<String>,
     pub trackers: Vec<String>,
     pub piece_length: Option<u32>,
+
+    /// Optional progress sender. Caller creates the channel and keeps the
+    /// `Receiver`; the creation function sends updates through this `Sender`.
+    /// Skipped during serialization since it's not data.
+    #[serde(skip)]
+    pub progress: Option<tokio::sync::watch::Sender<CreateTorrentProgress>>,
 }
 
 fn walk_dir_find_paths(dir: &Path, out: &mut Vec<Cow<'_, Path>>) -> anyhow::Result<()> {
@@ -47,9 +81,37 @@ fn compute_info_hash(t: &TorrentMetaV1Info<ByteBufOwned>) -> anyhow::Result<(Id2
     Ok((hash, bytes))
 }
 
-fn choose_piece_length(_input_files: &[Cow<'_, Path>]) -> u32 {
-    // TODO: make this smarter or smth
-    2 * 1024 * 1024
+/// Choose an appropriate piece length for a torrent based on total content size.
+///
+/// Targets approximately 1200 pieces, which balances:
+/// - Tracker overhead: fewer pieces = smaller `.torrent` file and faster hashing
+/// - Download granularity: more pieces = finer progress tracking and less waste
+///
+/// The result is clamped to a power of 2 between 32 KiB and 16 MiB, which is
+/// the standard range used by most torrent clients.
+///
+/// | Total Size | Piece Length | ~Pieces |
+/// |-----------|-------------|---------|
+/// | 100 MB    | 128 KiB     | 800     |
+/// | 1 GB      | 1 MiB       | 1024    |
+/// | 10 GB     | 8 MiB       | 1280    |
+/// | 50 GB     | 16 MiB      | 3200    |
+fn choose_piece_length(input_files: &[Cow<'_, Path>]) -> u32 {
+    let mut total_size = 0u64;
+    for file in input_files {
+        if let Ok(m) = std::fs::metadata(file) {
+            total_size += m.len();
+        }
+    }
+
+    // Aim for about 1200 pieces
+    let target_piece_size = total_size / 1200;
+
+    // Clamp to powers of 2 (next power of 2)
+    let piece_size = target_piece_size.next_power_of_two();
+
+    // Clamp between 32 KiB and 16 MiB
+    piece_size.clamp(32 * 1024, 16 * 1024 * 1024) as u32
 }
 
 fn osstr_to_bytes(o: &OsStr) -> Vec<u8> {
@@ -61,9 +123,9 @@ struct CreateTorrentRawResult {
     output_folder: PathBuf,
 }
 
-async fn create_torrent_raw<'a>(
-    path: &'a Path,
-    options: CreateTorrentOptions<'a>,
+async fn create_torrent_raw(
+    path: &Path,
+    options: CreateTorrentOptions,
     spawner: &BlockingSpawner,
 ) -> anyhow::Result<CreateTorrentRawResult> {
     path.try_exists()
@@ -74,12 +136,12 @@ async fn create_torrent_raw<'a>(
     let is_dir = path.is_dir();
     let single_file_mode = !is_dir;
     let name: ByteBufOwned = match options.name {
-        Some(name) => name.as_bytes().into(),
+        Some(name) => name.into_bytes().into(),
         None => osstr_to_bytes(basename).into(),
     };
     let output_folder: PathBuf;
 
-    let mut input_files: Vec<Cow<'a, Path>> = Default::default();
+    let mut input_files: Vec<Cow<'_, Path>> = Default::default();
     if is_dir {
         output_folder = path.to_owned();
         walk_dir_find_paths(path, &mut input_files)
@@ -97,6 +159,23 @@ async fn create_torrent_raw<'a>(
         .piece_length
         .unwrap_or_else(|| choose_piece_length(&input_files));
 
+    // Pre-compute total size for progress reporting
+    let total_bytes: u64 = input_files
+        .iter()
+        .filter_map(|f| std::fs::metadata(f.as_ref()).ok())
+        .map(|m| m.len())
+        .sum();
+    let total_files = input_files.len();
+
+    let progress_tx = options.progress;
+
+    if let Some(ref tx) = progress_tx {
+        tx.send_modify(|p| {
+            p.total_bytes = total_bytes;
+            p.total_files = total_files;
+        });
+    }
+
     // Calculate hashes etc.
     const READ_SIZE: u32 = 8192; // todo: twea
     let mut read_buf = vec![0; READ_SIZE as usize];
@@ -108,6 +187,7 @@ async fn create_torrent_raw<'a>(
     let mut piece_checksum = sha1w::Sha1::new();
     let mut piece_hashes = Vec::<u8>::new();
     let mut output_files: Vec<TorrentMetaV1File<ByteBufOwned>> = Vec::new();
+    let mut global_hashed: u64 = 0;
 
     'outer: for file in input_files {
         let filename = &*file;
@@ -139,10 +219,17 @@ async fn create_torrent_raw<'a>(
                     sha1: None,
                     symlink_path: None,
                 });
+                // Update progress: file completed
+                if let Some(ref tx) = progress_tx {
+                    tx.send_modify(|p| {
+                        p.hashed_files += 1;
+                    });
+                }
                 continue 'outer;
             }
 
             length += size as u64;
+            global_hashed += size as u64;
             piece_checksum.update(&read_buf[..size]);
 
             remaining_piece_length -= TryInto::<u32>::try_into(size)?;
@@ -150,8 +237,28 @@ async fn create_torrent_raw<'a>(
                 remaining_piece_length = piece_length;
                 piece_hashes.extend_from_slice(&piece_checksum.finish());
                 piece_checksum = sha1w::Sha1::new();
+
+                // Update progress every piece
+                if let Some(ref tx) = progress_tx {
+                    tx.send_modify(|p| {
+                        p.hashed_bytes = global_hashed;
+                    });
+                }
+
+                // Yield to the runtime so that JoinHandle::abort() can
+                // take effect.  Without this, the tight read-hash loop
+                // never reaches an .await point and cannot be cancelled.
+                tokio::task::yield_now().await;
             }
         }
+    }
+
+    // Final progress update
+    if let Some(ref tx) = progress_tx {
+        tx.send_modify(|p| {
+            p.hashed_bytes = global_hashed;
+            p.hashed_files = total_files;
+        });
     }
 
     if remaining_piece_length > 0 && length > 0 {
@@ -178,7 +285,7 @@ async fn create_torrent_raw<'a>(
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CreateTorrentResult {
     pub meta: TorrentMetaV1Owned,
     pub output_folder: PathBuf,
@@ -209,9 +316,13 @@ impl CreateTorrentResult {
     }
 }
 
-pub async fn create_torrent<'a>(
-    path: &'a Path,
-    options: CreateTorrentOptions<'a>,
+/// Create a torrent file from the given path.
+///
+/// Progress updates are sent through `options.progress` if provided.
+/// Cancellation: drop the returned future to cancel the operation.
+pub async fn create_torrent(
+    path: &Path,
+    options: CreateTorrentOptions,
     spawner: &BlockingSpawner,
 ) -> anyhow::Result<CreateTorrentResult> {
     let trackers = options

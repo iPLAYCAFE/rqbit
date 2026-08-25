@@ -12,11 +12,11 @@ pub fn make_webui_router() -> Router {
             }),
         )
         .route(
-            "/assets/index.js",
+            "/assets/bundle_v2.js",
             get(|| async {
                 (
                     [("Content-Type", "application/javascript")],
-                    include_str!("../../webui/dist/assets/index.js"),
+                    include_str!("../../webui/dist/assets/bundle_v2.js"),
                 )
             }),
         )
@@ -39,3 +39,4 @@ pub fn make_webui_router() -> Router {
             }),
         )
 }
+// Force rebuild 11

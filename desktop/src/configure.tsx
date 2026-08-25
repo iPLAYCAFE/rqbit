@@ -69,323 +69,383 @@ export const ConfigModal: React.FC<{
   initialConfig,
   defaultConfig,
 }) => {
-  const [config, setConfig] = useState<RqbitDesktopConfig>(initialConfig);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<ErrorWithLabel | null>(null);
+    const [config, setConfig] = useState<RqbitDesktopConfig>(initialConfig);
+    const [loading, setLoading] = useState<boolean>(false);
+    const [error, setError] = useState<ErrorWithLabel | null>(null);
 
-  const handleInputChange: React.ChangeEventHandler<HTMLInputElement> = (e) => {
-    const name: string = e.target.name;
-    let value: string | number = e.target.value;
-    if (e.target.type == "number") {
-      value = e.target.valueAsNumber;
-    }
-    const [mainField, subField] = name.split(".", 2);
+    const handleInputChange: React.ChangeEventHandler<HTMLInputElement> = (e) => {
+      const name: string = e.target.name;
+      let value: string | number = e.target.value;
+      if (e.target.type == "number") {
+        value = e.target.valueAsNumber;
+      }
+      const [mainField, subField] = name.split(".", 2);
 
-    if (subField) {
-      setConfig((prevConfig: any) => ({
-        ...prevConfig,
-        [mainField]: {
-          ...prevConfig[mainField],
-          [subField]: value,
+      if (subField) {
+        setConfig((prevConfig: any) => ({
+          ...prevConfig,
+          [mainField]: {
+            ...prevConfig[mainField],
+            [subField]: value,
+          },
+        }));
+      } else {
+        setConfig((prevConfig) => ({
+          ...prevConfig,
+          [name]: value,
+        }));
+      }
+    };
+
+    const handleToggleChange: React.ChangeEventHandler<HTMLInputElement> = (
+      e,
+    ) => {
+      const name: string = e.target.name;
+      const [mainField, subField] = name.split(".", 2);
+
+      if (subField) {
+        setConfig((prevConfig: any) => ({
+          ...prevConfig,
+          [mainField]: {
+            ...prevConfig[mainField],
+            [subField]: !prevConfig[mainField][subField],
+          },
+        }));
+      } else {
+        setConfig((prevConfig: any) => ({
+          ...prevConfig,
+          [name]: !prevConfig[name],
+        }));
+      }
+    };
+
+    const handleOkClick = () => {
+      setError(null);
+      handleStartReconfigure();
+      setLoading(true);
+      invokeAPI<{}>("config_change", { config }).then(
+        () => {
+          setLoading(false);
+          handleConfigured(config);
         },
-      }));
-    } else {
-      setConfig((prevConfig) => ({
-        ...prevConfig,
-        [name]: value,
-      }));
-    }
-  };
-
-  const handleToggleChange: React.ChangeEventHandler<HTMLInputElement> = (
-    e,
-  ) => {
-    const name: string = e.target.name;
-    const [mainField, subField] = name.split(".", 2);
-
-    if (subField) {
-      setConfig((prevConfig: any) => ({
-        ...prevConfig,
-        [mainField]: {
-          ...prevConfig[mainField],
-          [subField]: !prevConfig[mainField][subField],
+        (e: ErrorDetails) => {
+          setLoading(false);
+          setError({
+            text: "Error saving configuration",
+            details: e,
+          });
         },
-      }));
-    } else {
-      setConfig((prevConfig: any) => ({
-        ...prevConfig,
-        [name]: !prevConfig[name],
-      }));
-    }
-  };
+      );
+    };
 
-  const handleOkClick = () => {
-    setError(null);
-    handleStartReconfigure();
-    setLoading(true);
-    invokeAPI<{}>("config_change", { config }).then(
-      () => {
-        setLoading(false);
-        handleConfigured(config);
-      },
-      (e: ErrorDetails) => {
-        setLoading(false);
-        setError({
-          text: "Error saving configuration",
-          details: e,
-        });
-      },
-    );
-  };
-
-  const tabs: ConfigTab[] = [
-    {
-      id: "home",
-      label: "Home",
-      content: (
-        <Fieldset>
-          <FormInput
-            label="Default download folder"
-            name="default_download_location"
-            value={config.default_download_location}
-            inputType="text"
-            onChange={handleInputChange}
-            help="Where to download torrents by default. You can override this per torrent."
-          />
-          {defaultConfig.disable_upload !== undefined &&
-            config.disable_upload !== undefined && (
-              <FormCheck
-                label="Disable upload"
-                name="disable_upload"
-                checked={config.disable_upload}
-                onChange={handleToggleChange}
-                help="Disable uploading entirely. If this is set, rqbit won't share piece availability and will disconnect on download request.
+    const tabs: ConfigTab[] = [
+      {
+        id: "home",
+        label: "Home",
+        content: (
+          <Fieldset>
+            <FormInput
+              label="Default download folder"
+              name="default_download_location"
+              value={config.default_download_location}
+              inputType="text"
+              onChange={handleInputChange}
+              help="Where to download torrents by default. You can override this per torrent."
+            />
+            {defaultConfig.disable_upload !== undefined &&
+              config.disable_upload !== undefined && (
+                <FormCheck
+                  label="Disable upload"
+                  name="disable_upload"
+                  checked={config.disable_upload}
+                  onChange={handleToggleChange}
+                  help="Disable uploading entirely. If this is set, rqbit won't share piece availability and will disconnect on download request.
 
 Might be useful e.g. if rqbit upload consumes all your upload bandwidth and interferes with your other Internet usage."
-              />
-            )}
-        </Fieldset>
-      ),
-    },
-    {
-      id: "dht",
-      label: "DHT",
-      content: (
-        <Fieldset>
-          <FormCheck
-            label="Enable DHT"
-            name="dht.disable"
-            checked={!config.dht.disable}
-            onChange={handleToggleChange}
-            help="DHT is required to read magnet links. There's no good reason to disable it, unless you know what you are doing."
-          />
-          <FormCheck
-            label="Enable DHT persistence"
-            name="dht.disable_persistence"
-            checked={!config.dht.disable_persistence}
-            onChange={handleToggleChange}
-            disabled={config.dht.disable}
-            help="Enable to store DHT state in a file periodically. If disabled, DHT will bootstrap from scratch on restart."
-          />
-          <FormInput
-            label="Persistence filename"
-            name="dht.persistence_filename"
-            value={config.dht.persistence_filename}
-            inputType="text"
-            disabled={config.dht.disable}
-            onChange={handleInputChange}
-            help="The filename to store DHT state into"
-          />
-        </Fieldset>
-      ),
-    },
-    {
-      id: "session",
-      label: "Session",
-      content: (
-        <Fieldset>
-          <FormCheck
-            label="Enable persistence"
-            name="persistence.disable"
-            checked={!config.persistence.disable}
-            onChange={handleToggleChange}
-            help="If you disable session persistence, rqbit won't remember the torrents you had before restart."
-          />
-          <FormInput
-            label="Persistence folder"
-            name="persistence.folder"
-            inputType="text"
-            value={config.persistence.folder}
-            onChange={handleInputChange}
-            disabled={config.persistence.disable}
-          />
-          <FormCheck
-            label="Enable fast resume (experimental)"
-            name="persistence.fastresume"
-            checked={config.persistence.fastresume}
-            onChange={handleToggleChange}
-            help="If enabled, restarting will not rehash torrents, and thus will be faster. You should not modify the downloaded files in any way if you use that."
-          />
-          <RateLimitsTab
-            downloadBps={config.ratelimits.download_bps}
-            uploadBps={config.ratelimits.upload_bps}
-            onDownloadBpsChange={(v) =>
-              setConfig((c) => ({
-                ...c,
-                ratelimits: { ...c.ratelimits, download_bps: v },
-              }))
-            }
-            onUploadBpsChange={(v) =>
-              setConfig((c) => ({
-                ...c,
-                ratelimits: { ...c.ratelimits, upload_bps: v },
-              }))
-            }
-          />
-        </Fieldset>
-      ),
-    },
-    {
-      id: "connection",
-      label: "Connection",
-      content: (
-        <Fieldset>
-          <FormCheck
-            label="Listen on TCP"
-            name="connections.enable_tcp_listen"
-            checked={config.connections.enable_tcp_listen}
-            onChange={handleToggleChange}
-            help="Listen for torrent requests on TCP. Required for peers to be able to connect to you, mainly for uploading."
-          />
-          <FormCheck
-            label="Listen on uTP (over UDP)"
-            name="connections.enable_utp"
-            checked={config.connections.enable_utp}
-            onChange={handleToggleChange}
-            help="Listen for torrent requests on uTP over UDP. Required for uTP support in general, both outgoing and incoming."
-          />
-          <FormCheck
-            label="Advertise port over UPnP"
-            name="connections.enable_upnp_port_forward"
-            checked={config.connections.enable_upnp_port_forward}
-            onChange={handleToggleChange}
-            help="Advertise your port over UPnP to your router(s). This is required for peers to be able to connect to you from the internet. Will only work if your router has a static IP."
-          />
-          <FormCheck
-            label="[ADVANCED] Disable outgoing connections over TCP"
-            name="connections.enable_tcp_outgoing"
-            checked={!config.connections.enable_tcp_outgoing}
-            onChange={handleToggleChange}
-            help="WARNING: leave this unchecked unless you know what you are doing."
-          />
-          <FormInput
-            inputType="text"
-            label="Socks proxy"
-            name="connections.socks_proxy"
-            value={config.connections.socks_proxy}
-            onChange={handleInputChange}
-            help="Socks5 proxy for outgoing connections. Format: socks5://[username:password@]host:port"
-          />
-          <FormInput
-            inputType="number"
-            label="Port"
-            name="connections.listen_port"
-            value={config.connections.listen_port}
-            disabled={
-              !config.connections.enable_tcp_listen &&
-              !config.connections.enable_utp
-            }
-            onChange={handleInputChange}
-            help="The port to listen on for both TCP and UDP (if enabled)."
-          />
-          <FormInput
-            label="Peer connect timeout (seconds)"
-            inputType="number"
-            name="connections.peer_connect_timeout"
-            value={config.connections.peer_connect_timeout}
-            onChange={handleInputChange}
-            help="How much to wait for outgoing connections to connect. Default is low to prefer faster peers."
-          />
-          <FormInput
-            label="Peer read/write timeout (seconds)"
-            inputType="number"
-            name="connections.peer_read_write_timeout"
-            value={config.connections.peer_read_write_timeout}
-            onChange={handleInputChange}
-            help="Peer socket read/write timeout."
-          />
-        </Fieldset>
-      ),
-    },
-    {
-      id: "http_api",
-      label: "HTTP API",
-      content: (
-        <Fieldset>
-          <FormCheck
-            label="Enable HTTP API"
-            name="http_api.disable"
-            checked={!config.http_api.disable}
-            onChange={handleToggleChange}
-            help="If enabled you can access the HTTP API at the address below"
-          />
-          <FormCheck
-            label="Read only"
-            name="http_api.read_only"
-            checked={config.http_api.read_only}
-            disabled={config.http_api.disable}
-            onChange={handleToggleChange}
-            help="If enabled, only GET requests will be allowed through the API"
-          />
-          <FormInput
-            label="Listen address"
-            inputType="text"
-            name="http_api.listen_addr"
-            value={config.http_api.listen_addr}
-            disabled={config.http_api.disable}
-            onChange={handleInputChange}
-            help={`You'll access the API at http://${config.http_api.listen_addr}`}
-          />
-        </Fieldset>
-      ),
-    },
-    {
-      id: "upnp",
-      label: "UPnP Server",
-      content: (
-        <Fieldset>
-          <FormCheck
-            label="Enable UPnP media server"
-            name="upnp.enable_server"
-            checked={config.upnp.enable_server}
-            onChange={handleToggleChange}
-            help="If enabled, rqbit will advertise the media to supported LAN devices, e.g. TVs."
-          />
-          <FormInput
-            inputType="text"
-            label="Friendly name"
-            name="upnp.server_friendly_name"
-            value={config.upnp.server_friendly_name}
-            disabled={!config.upnp.enable_server}
-            onChange={handleInputChange}
-            help="The name displayed on supported devices. If not set will be generated, will look smth like <rqbit at HOSTNAME>."
-          />
-        </Fieldset>
-      ),
-    },
-  ];
+                />
+              )}
+          </Fieldset>
+        ),
+      },
+      {
+        id: "features",
+        label: "Features",
+        content: (
+          <Fieldset>
+            <FormCheck
+              label="Kill Locking Processes (Windows only)"
+              name="features.kill_locking_processes"
+              checked={!!config.features?.kill_locking_processes}
+              onChange={handleToggleChange}
+              help="If enabled, rqbit will attempt to check for and kill processes (like File Explorer) that are locking the download directory before starting."
+            />
+            <FormCheck
+              label="Sync Extra Files"
+              name="features.sync_extra_files"
+              checked={!!config.features?.sync_extra_files}
+              onChange={handleToggleChange}
+              help="If enabled, when a torrent finishes downloading (or if skipped), rqbit will remove any files or empty directories in the output folder that are not part of the torrent."
+            />
+            <FormCheck
+              label="Permissive File Opening (Windows only)"
+              name="features.permissive_file_opening"
+              checked={!!config.features?.permissive_file_opening}
+              onChange={handleToggleChange}
+              help="If enabled, files opened by rqbit will allow other processes to modify or delete them (FILE_SHARE_DELETE). This is useful if you want to be able to rename or move files while seeding."
+            />
+            <FormCheck
+              label="File Integrity Monitor"
+              name="features.enable_file_integrity_monitor"
+              checked={!!config.features?.enable_file_integrity_monitor}
+              onChange={handleToggleChange}
+              help="If enabled, rqbit will periodically check if torrent files have been modified externally while seeding, and auto-pause the torrent to prevent serving corrupted data to peers. Also validates file integrity on startup when fast resume / skip hash check is enabled."
+            />
+          </Fieldset>
+        ),
+      },
+      {
+        id: "dht",
+        label: "DHT",
+        content: (
+          <Fieldset>
+            <FormCheck
+              label="Enable DHT"
+              name="dht.disable"
+              checked={!config.dht.disable}
+              onChange={handleToggleChange}
+              help="DHT is required to read magnet links. There's no good reason to disable it, unless you know what you are doing."
+            />
+            <FormCheck
+              label="Enable DHT persistence"
+              name="dht.disable_persistence"
+              checked={!config.dht.disable_persistence}
+              onChange={handleToggleChange}
+              disabled={config.dht.disable}
+              help="Enable to store DHT state in a file periodically. If disabled, DHT will bootstrap from scratch on restart."
+            />
+            <FormInput
+              label="Persistence filename"
+              name="dht.persistence_filename"
+              value={config.dht.persistence_filename}
+              inputType="text"
+              disabled={config.dht.disable}
+              onChange={handleInputChange}
+              help="The filename to store DHT state into"
+            />
+          </Fieldset>
+        ),
+      },
+      {
+        id: "session",
+        label: "Session",
+        content: (
+          <Fieldset>
+            <FormCheck
+              label="Enable persistence"
+              name="persistence.disable"
+              checked={!config.persistence.disable}
+              onChange={handleToggleChange}
+              help="If you disable session persistence, rqbit won't remember the torrents you had before restart."
+            />
+            <FormInput
+              label="Persistence folder"
+              name="persistence.folder"
+              inputType="text"
+              value={config.persistence.folder}
+              onChange={handleInputChange}
+              disabled={config.persistence.disable}
+            />
+            <FormCheck
+              label="Enable fast resume (experimental)"
+              name="persistence.fastresume"
+              checked={config.persistence.fastresume}
+              onChange={handleToggleChange}
+              help="If enabled, restarting will not rehash torrents, and thus will be faster. You should not modify the downloaded files in any way if you use that."
+            />
+            <FormCheck
+              label="Skip hash check (Server-side)"
+              name="persistence.skip_hash_check"
+              checked={!!config.persistence.skip_hash_check}
+              onChange={handleToggleChange}
+              help="Only affects existing torrents when the application starts up. Does not affect newly added or created torrents. Warning: Skips data verification. Only enable if you trust your storage."
+            />
+            <RateLimitsTab
+              downloadBps={config.ratelimits.download_bps}
+              uploadBps={config.ratelimits.upload_bps}
+              onDownloadBpsChange={(v) =>
+                setConfig((c) => ({
+                  ...c,
+                  ratelimits: { ...c.ratelimits, download_bps: v },
+                }))
+              }
+              onUploadBpsChange={(v) =>
+                setConfig((c) => ({
+                  ...c,
+                  ratelimits: { ...c.ratelimits, upload_bps: v },
+                }))
+              }
+            />
+            <FormInput
+              label="Concurrent hash check limit"
+              inputType="number"
+              name="concurrent_init_limit"
+              value={config.concurrent_init_limit}
+              onChange={handleInputChange}
+              help="How many torrents can be hash-checked at the same time when starting up. Higher values use more disk I/O. Default: 3"
+            />
+          </Fieldset>
+        ),
+      },
+      {
+        id: "connection",
+        label: "Connection",
+        content: (
+          <Fieldset>
+            <FormCheck
+              label="Listen on TCP"
+              name="connections.enable_tcp_listen"
+              checked={config.connections.enable_tcp_listen}
+              onChange={handleToggleChange}
+              help="Listen for torrent requests on TCP. Required for peers to be able to connect to you, mainly for uploading."
+            />
+            <FormCheck
+              label="Listen on uTP (over UDP)"
+              name="connections.enable_utp"
+              checked={config.connections.enable_utp}
+              onChange={handleToggleChange}
+              help="Listen for torrent requests on uTP over UDP. Required for uTP support in general, both outgoing and incoming."
+            />
+            <FormCheck
+              label="Advertise port over UPnP"
+              name="connections.enable_upnp_port_forward"
+              checked={config.connections.enable_upnp_port_forward}
+              onChange={handleToggleChange}
+              help="Advertise your port over UPnP to your router(s). This is required for peers to be able to connect to you from the internet. Will only work if your router has a static IP."
+            />
+            <FormCheck
+              label="[ADVANCED] Disable outgoing connections over TCP"
+              name="connections.enable_tcp_outgoing"
+              checked={!config.connections.enable_tcp_outgoing}
+              onChange={handleToggleChange}
+              help="WARNING: leave this unchecked unless you know what you are doing."
+            />
+            <FormInput
+              inputType="text"
+              label="Socks proxy"
+              name="connections.socks_proxy"
+              value={config.connections.socks_proxy}
+              onChange={handleInputChange}
+              help="Socks5 proxy for outgoing connections. Format: socks5://[username:password@]host:port"
+            />
+            <FormInput
+              inputType="number"
+              label="Port"
+              name="connections.listen_port"
+              value={config.connections.listen_port}
+              disabled={
+                !config.connections.enable_tcp_listen &&
+                !config.connections.enable_utp
+              }
+              onChange={handleInputChange}
+              help="The port to listen on for both TCP and UDP (if enabled)."
+            />
+            <FormInput
+              label="Peer connect timeout (seconds)"
+              inputType="number"
+              name="connections.peer_connect_timeout"
+              value={config.connections.peer_connect_timeout}
+              onChange={handleInputChange}
+              help="How much to wait for outgoing connections to connect. Default is low to prefer faster peers."
+            />
+            <FormInput
+              label="Peer read/write timeout (seconds)"
+              inputType="number"
+              name="connections.peer_read_write_timeout"
+              value={config.connections.peer_read_write_timeout}
+              onChange={handleInputChange}
+              help="Peer socket read/write timeout."
+            />
+          </Fieldset>
+        ),
+      },
+      {
+        id: "http_api",
+        label: "HTTP API",
+        content: (
+          <Fieldset>
+            <FormCheck
+              label="Enable HTTP API"
+              name="http_api.disable"
+              checked={!config.http_api.disable}
+              onChange={handleToggleChange}
+              help="If enabled you can access the HTTP API at the address below"
+            />
+            <FormCheck
+              label="Read only"
+              name="http_api.read_only"
+              checked={config.http_api.read_only}
+              disabled={config.http_api.disable}
+              onChange={handleToggleChange}
+              help="If enabled, only GET requests will be allowed through the API"
+            />
+            <FormInput
+              label="Listen address"
+              inputType="text"
+              name="http_api.listen_addr"
+              value={config.http_api.listen_addr}
+              disabled={config.http_api.disable}
+              onChange={handleInputChange}
+              help={`You'll access the API at http://${config.http_api.listen_addr}`}
+            />
+            <FormInput
+              label="Basic Auth (username:password)"
+              inputType="text"
+              name="http_api.basic_auth"
+              value={config.http_api.basic_auth ?? ""}
+              disabled={config.http_api.disable}
+              onChange={handleInputChange}
+              help="Optional. Protect the HTTP API with Basic Authentication. Format: username:password"
+            />
+          </Fieldset>
+        ),
+      },
+      {
+        id: "upnp",
+        label: "UPnP Server",
+        content: (
+          <Fieldset>
+            <FormCheck
+              label="Enable UPnP media server"
+              name="upnp.enable_server"
+              checked={config.upnp.enable_server}
+              onChange={handleToggleChange}
+              help="If enabled, rqbit will advertise the media to supported LAN devices, e.g. TVs."
+            />
+            <FormInput
+              inputType="text"
+              label="Friendly name"
+              name="upnp.server_friendly_name"
+              value={config.upnp.server_friendly_name}
+              disabled={!config.upnp.enable_server}
+              onChange={handleInputChange}
+              help="The name displayed on supported devices. If not set will be generated, will look smth like <rqbit at HOSTNAME>."
+            />
+          </Fieldset>
+        ),
+      },
+    ];
 
-  return (
-    <TabbedConfigModal
-      isOpen={show}
-      onClose={handleCancel}
-      title="Configure Rqbit desktop"
-      tabs={tabs}
-      onSave={handleOkClick}
-      onReset={() => setConfig(defaultConfig)}
-      showResetButton={true}
-      isSaving={loading}
-      error={error}
-    />
-  );
-};
+    return (
+      <TabbedConfigModal
+        isOpen={show}
+        onClose={handleCancel}
+        title="Configure Rqbit desktop"
+        tabs={tabs}
+        onSave={handleOkClick}
+        onReset={() => setConfig(defaultConfig)}
+        showResetButton={true}
+        isSaving={loading}
+        error={error}
+      />
+    );
+  };

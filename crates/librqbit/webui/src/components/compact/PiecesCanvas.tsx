@@ -28,7 +28,15 @@ export const PiecesCanvas: React.FC<PiecesCanvasProps> = ({
     return customSetInterval(async () => {
       try {
         const buffer = await API.getTorrentHaves(torrentId);
-        setBitmap(buffer);
+        setBitmap(prev => {
+          if (!prev) return buffer;
+          if (prev.length !== buffer.length) return buffer;
+          // Check deep equality
+          for (let i = 0; i < prev.length; i++) {
+            if (prev[i] !== buffer[i]) return buffer;
+          }
+          return prev; // Return same reference to skip render
+        });
       } catch (e) {
         console.error("Failed to fetch haves:", e);
       }

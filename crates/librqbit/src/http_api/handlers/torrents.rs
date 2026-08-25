@@ -365,6 +365,8 @@ pub struct HttpCreateTorrentOptions {
     #[serde(default)]
     trackers: Vec<String>,
     name: Option<String>,
+    #[serde(default)]
+    stream: bool,
 }
 
 pub async fn h_create_torrent(
@@ -386,10 +388,56 @@ pub async fn h_create_torrent(
     );
 
     let create_opts = CreateTorrentOptions {
-        name: opts.name.as_deref(),
+        name: opts.name.clone(),
         trackers: opts.trackers,
         piece_length: None,
+        progress: None,
     };
+
+    if opts.stream {
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<std::result::Result<String, anyhow::Error>>(128);
+
+        let session = state.api.session().clone();
+        let path = path.to_owned();
+        let stream_opts = CreateTorrentOptions {
+            name: create_opts.name.clone(),
+            trackers: create_opts.trackers.clone(),
+            piece_length: create_opts.piece_length,
+            progress: None,
+        };
+
+        tokio::spawn(async move {
+            let res = session.create_and_serve_torrent(&path, stream_opts).await;
+
+            match res {
+                Ok((_torrent, handle)) => {
+                    let _ = tx
+                        .send(Ok(serde_json::json!({
+                            "type": "success",
+                            "id": handle.id()
+                        })
+                        .to_string()
+                            + "\n"))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(serde_json::json!({
+                            "type": "error",
+                            "error": e.to_string()
+                        })
+                        .to_string()
+                            + "\n"))
+                        .await;
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let body = Body::from_stream(stream);
+        return Ok(body.into_response());
+    }
 
     let (torrent, handle) = state
         .api
@@ -434,4 +482,76 @@ pub async fn h_create_torrent(
             Ok((headers, torrent.as_bytes()?).into_response())
         }
     }
+}
+
+pub async fn h_create_torrent_task_enqueue(
+    State(state): State<ApiState>,
+    Query(opts): Query<HttpCreateTorrentOptions>,
+    body: Bytes,
+) -> Result<impl IntoResponse> {
+    if !state.opts.allow_create {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "creating torrents not allowed. Enable through CLI options",
+        )
+            .into());
+    }
+
+    let path = std::path::PathBuf::from(
+        std::str::from_utf8(body.as_ref())
+            .with_status_error(StatusCode::BAD_REQUEST, "invalid utf-8")?,
+    );
+
+    let create_opts = CreateTorrentOptions {
+        name: opts.name,
+        trackers: opts.trackers,
+        piece_length: None,
+        progress: None,
+    };
+
+    let id = state.api.api_create_torrent_enqueue(path, create_opts)?;
+    Ok(axum::Json(serde_json::json!({ "id": id })))
+}
+
+pub async fn h_create_torrent_task_list(
+    State(state): State<ApiState>,
+) -> Result<impl IntoResponse> {
+    let tasks = state.api.api_create_torrent_list()?;
+    // Serialize each task while holding the lock
+    let json_tasks: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|t| serde_json::to_value(&*t.read()).unwrap_or(serde_json::Value::Null))
+        .collect();
+    Ok(axum::Json(json_tasks))
+}
+
+pub async fn h_create_torrent_task_cancel(
+    State(state): State<ApiState>,
+    Path(id): Path<usize>,
+) -> Result<impl IntoResponse> {
+    state.api.api_create_torrent_cancel(id)?;
+    Ok(axum::Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn h_torrent_list_extra_files(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+) -> Result<impl IntoResponse> {
+    state.api.api_list_extra_files(idx).map(axum::Json)
+}
+
+#[derive(Deserialize)]
+pub struct DeleteExtraFilesRequest {
+    files: Vec<String>,
+}
+
+pub async fn h_torrent_delete_extra_files(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    axum::Json(req): axum::Json<DeleteExtraFilesRequest>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_delete_extra_files(idx, req.files)
+        .map(axum::Json)
 }

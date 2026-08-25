@@ -1,5 +1,7 @@
 name: Release binaries for Linux and Docker
 
+# Fork releases: Ubicloud Linux runners only (`ubicloud` / `ubicloud-arm`).
+# Windows releases use GitHub-hosted `windows-latest`. macOS is not built in CI on this fork.
 on:
   push:
     branches:
@@ -9,15 +11,15 @@ on:
 
 jobs:
   release-linux:
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     if: github.ref_type == 'tag'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - runner: ubicloud
             arch: amd64
-          - os: ubuntu-24.04-arm
+          - runner: ubicloud-arm
             arch: arm64
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +45,7 @@ jobs:
 
       - name: cargo tauri build
         working-directory: desktop
-        run:
-          cargo tauri build --ci
+        run: cargo tauri build --ci
 
       - name: Move files
         run: |
@@ -63,7 +64,7 @@ jobs:
             ${{ github.workspace }}/builds/*
 
   build-docker-cross:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud
     strategy:
       fail-fast: true
       matrix:
@@ -140,7 +141,7 @@ jobs:
           path: target/cross/${{ matrix.platform }}/rqbit
 
   build-push-docker-multiarch:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud
     needs: build-docker-cross
     steps:
       - uses: actions/checkout@v4

@@ -135,7 +135,27 @@ pub fn make_api_router(state: ApiState) -> Router {
                 post(torrents::h_torrent_action_update_only_files),
             )
             .route("/torrents/{id}/add_peers", post(torrents::h_add_peers))
-            .route("/torrents/create", post(torrents::h_create_torrent));
+            .route("/torrents/create", post(torrents::h_create_torrent))
+            .route(
+                "/torrents/create_task",
+                post(torrents::h_create_torrent_task_enqueue),
+            )
+            .route(
+                "/torrents/create_tasks",
+                get(torrents::h_create_torrent_task_list),
+            )
+            .route(
+                "/torrents/create_tasks/{id}",
+                axum::routing::delete(torrents::h_create_torrent_task_cancel),
+            )
+            .route(
+                "/torrents/{id}/extra_files",
+                get(torrents::h_torrent_list_extra_files),
+            )
+            .route(
+                "/torrents/{id}/delete_extra_files",
+                post(torrents::h_torrent_delete_extra_files),
+            );
     }
 
     api_router.with_state(state)

@@ -105,6 +105,8 @@ pub(crate) struct ManagedTorrentLocked {
     pub(crate) paused: bool,
     pub(crate) state: ManagedTorrentState,
     pub(crate) only_files: Option<Vec<usize>>,
+    pub(crate) total_fetched_bytes: u64,
+    pub(crate) last_activity: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Default)]
@@ -117,6 +119,16 @@ pub(crate) struct ManagedTorrentOptions {
     pub ratelimits: LimitsConfig,
     pub initial_peers: Vec<SocketAddr>,
     pub peer_limit: Option<usize>,
+    pub kill_locking_processes: bool,
+    pub sync_extra_files: bool,
+    /// True when this torrent is being restored from session persistence.
+    /// Used to skip operations like kill_locking_processes and sync_extra_files
+    /// that should only run during active download, not on every app restart.
+    pub is_restoring: bool,
+    pub _skip_hash_check: bool,
+    pub enable_file_integrity_monitor: bool,
+    pub permissive_file_opening: Option<bool>,
+    pub peer_pruning_max: Option<usize>,
     #[cfg(feature = "disable-upload")]
     pub _disable_upload: bool,
 }
@@ -194,6 +206,7 @@ pub struct ManagedTorrentShared {
     pub(crate) magnet_name: Option<String>,
 
     pub(crate) client_name_and_version: String,
+    pub added_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ManagedTorrentShared {
@@ -302,12 +315,10 @@ impl ManagedTorrent {
 
         match g.state.take() {
             ManagedTorrentState::Live(live) => {
-                if let Err(err) = live.pause() {
-                    warn!(
-                        id = self.shared.id,
-                        info_hash = ?self.shared.info_hash,
-                        "error pausing live torrent during fatal error handling: {err:#}",
-                    );
+                let _ = live.pause();
+                g.total_fetched_bytes += live.get_downloaded_bytes();
+                if let Some(la) = live.get_last_activity() {
+                    g.last_activity = Some(la);
                 }
             }
             ManagedTorrentState::Error(e) => {
@@ -437,6 +448,7 @@ impl ManagedTorrent {
                             .storage_factory
                             .create_and_init(t.shared(), &metadata)?,
                         true,
+                        false,
                     ));
                     g.state = ManagedTorrentState::Initializing(initializing.clone());
                     t.state_change_notify.notify_waiters();
@@ -476,7 +488,12 @@ impl ManagedTorrent {
         let mut g = self.locked.write();
         match &g.state {
             ManagedTorrentState::Live(live) => {
+                let live = live.clone();
                 let paused = live.pause()?;
+                g.total_fetched_bytes += live.get_downloaded_bytes();
+                if let Some(la) = live.get_last_activity() {
+                    g.last_activity = Some(la);
+                }
                 g.state = ManagedTorrentState::Paused(paused);
                 g.paused = true;
                 self.state_change_notify.notify_waiters();
@@ -516,6 +533,9 @@ impl ManagedTorrent {
             uploaded_bytes: 0,
             finished: false,
             live: None,
+            added_at: self.shared.added_at,
+            total_fetched_bytes: 0,
+            last_activity: None,
         };
 
         {
@@ -560,6 +580,12 @@ impl ManagedTorrent {
             }
         }
 
+        resp.total_fetched_bytes = self.get_total_fetched_bytes();
+        // Prefer live activity if available, otherwise fallback to stored state
+        resp.last_activity = self
+            .live()
+            .and_then(|l| l.get_last_activity())
+            .or_else(|| self.get_last_activity());
         resp
     }
 
@@ -643,6 +669,15 @@ impl ManagedTorrent {
 
         g.only_files = Some(only_files.iter().copied().collect());
         Ok(())
+    }
+
+    pub fn get_total_fetched_bytes(&self) -> u64 {
+        let live_bytes = self.live().map(|l| l.get_downloaded_bytes()).unwrap_or(0);
+        self.locked.read().total_fetched_bytes + live_bytes
+    }
+
+    pub fn get_last_activity(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.locked.read().last_activity
     }
 }
 

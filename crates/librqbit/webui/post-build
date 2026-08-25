@@ -17,13 +17,18 @@ let indexHtml = fs.readFileSync('index.html', 'utf-8');
 const files = [
     { dst: 'assets/logo.svg', src: manifest['assets/logo.svg'].file },
     { dst: 'assets/index.css', src: manifest['index.html'].css[0] },
-    { dst: 'assets/index.js', src: manifest['index.html'].file }
+    { dst: 'assets/bundle_v2.js', src: manifest['index.html'].file }
 ];
 
 // Replace and rename files
 files.forEach(({ dst, src }) => {
+    console.log(`Renaming ${src} to ${dst}`);
     indexHtml = indexHtml.replace(`/${src}`, dst);
-    fs.renameSync(src, dst);
+    try {
+        fs.renameSync(src, dst);
+    } catch (e) {
+        console.error(`Failed to rename ${src} to ${dst}:`, e);
+    }
 });
 
 // Write the updated 'index.html'

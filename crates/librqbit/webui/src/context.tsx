@@ -17,6 +17,9 @@ export const APIContext = createContext<RqbitAPI>({
   uploadTorrent: () => {
     throw new Error("Function not implemented.");
   },
+  createTorrent: () => {
+    throw new Error("Function not implemented.");
+  },
   updateOnlyFiles: () => {
     throw new Error("Function not implemented.");
   },
@@ -51,6 +54,24 @@ export const APIContext = createContext<RqbitAPI>({
     throw new Error("Function not implemented.");
   },
   setLimits: function (limits: LimitsConfig): Promise<void> {
+    throw new Error("Function not implemented.");
+  },
+  createTorrentTask: function (): Promise<number> {
+    throw new Error("Function not implemented.");
+  },
+  listCreateTorrentTasks: function (): Promise<any[]> {
+    throw new Error("Function not implemented.");
+  },
+  cancelCreateTorrentTask: function (id: number): Promise<void> {
+    throw new Error("Function not implemented.");
+  },
+  deleteCreateTorrentTask: function (id: number): Promise<void> {
+    throw new Error("Function not implemented.");
+  },
+  listExtraFiles: function (index: number): Promise<{ extra_files: string[] }> {
+    throw new Error("Function not implemented.");
+  },
+  removeExtraFiles: function (index: number, files: string[]): Promise<{ removed: number; failed: number }> {
     throw new Error("Function not implemented.");
   },
 });

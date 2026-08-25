@@ -12,5 +12,13 @@ export default defineConfig({
   },
   build: {
     manifest: true,
+    rollupOptions: {
+      output: {
+        inlineDynamicImports: true,
+        entryFileNames: "assets/[name].js",
+        chunkFileNames: "assets/[name].js",
+        assetFileNames: "assets/[name].[ext]",
+      },
+    },
   },
 });

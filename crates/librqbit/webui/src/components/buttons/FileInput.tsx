@@ -27,7 +27,6 @@ export const FileInput = ({ className }: { className?: string }) => {
         const file = inputRef.current.files[i];
         API.uploadTorrent(file, { overwrite: true }).then(
           () => {
-            console.log("uploaded file successfully");
             refreshTorrents();
           },
           (err) => {

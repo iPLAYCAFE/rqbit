@@ -1,17 +1,20 @@
 name: Run tests
 
+# Linux: Ubicloud (`ubicloud`). Windows: GitHub-hosted (`windows-latest`).
+# See: https://www.ubicloud.com/docs/github-actions-integration/quickstart
 on:
   push:
     branches: [main, dev]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check-rust-compat:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud
     strategy:
       matrix:
         rust_version: ["1.94", "1.97"]
@@ -38,8 +41,12 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - runner: ubicloud
+            os_kind: linux
+          - runner: windows-latest
+            os_kind: windows
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,16 +54,40 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1
+          prefix-key: v1-${{ matrix.runner }}
 
-      - name: Run tests
-        if: ${{ matrix.os == 'windows-latest' }}
-        run: cargo test --workspace
-
-      - name: Run tests
-        if: ${{ matrix.os == 'macos-latest' }}
-        run: ulimit -n unlimited && cargo test --workspace
-
-      - name: Run tests
-        if: ${{ matrix.os == 'ubuntu-latest' }}
+      - name: Run tests (Linux)
+        if: matrix.os_kind == 'linux'
         run: cargo test
+
+      - name: Run tests (Windows)
+        if: matrix.os_kind == 'windows'
+        # Exclude Tauri desktop: generate_context! requires frontend dist/ which CI does not build.
+        run: cargo test --workspace --exclude rqbit-desktop
+
+  desktop-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-desktop-windows
+          workspaces: desktop/src-tauri -> target
+
+      - name: npm install (workspace)
+        run: npm install
+
+      - name: Build desktop frontend
+        working-directory: desktop
+        run: npm run build
+
+      - name: cargo check rqbit-desktop
+        run: cargo check -p rqbit-desktop

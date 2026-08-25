@@ -107,7 +107,7 @@ pub enum Error {
     ),
 
     #[error("bug: peer not found")]
-    BugPeerNotFound,
+    PeerNotFound,
 
     #[error("bug: invalid peer state")]
     BugInvalidPeerState,

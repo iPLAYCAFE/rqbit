@@ -103,6 +103,9 @@ pub struct RqbitDesktopConfigPersistence {
     #[serde(default)]
     pub fastresume: bool,
 
+    #[serde(default)]
+    pub skip_hash_check: bool,
+
     /// Deprecated, but keeping for backwards compat for serialized / deserialized config.
     #[serde(default)]
     pub filename: PathBuf,
@@ -128,6 +131,7 @@ impl Default for RqbitDesktopConfigPersistence {
             disable: false,
             folder,
             fastresume: false,
+            skip_hash_check: false,
             filename: PathBuf::new(),
         }
     }
@@ -140,6 +144,7 @@ pub struct RqbitDesktopConfigHttpApi {
     pub disable: bool,
     pub listen_addr: SocketAddr,
     pub read_only: bool,
+    pub basic_auth: Option<String>,
 }
 
 impl Default for RqbitDesktopConfigHttpApi {
@@ -148,8 +153,25 @@ impl Default for RqbitDesktopConfigHttpApi {
             disable: Default::default(),
             listen_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 3030)),
             read_only: false,
+            basic_auth: None,
         }
     }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(default)]
+pub struct RqbitDesktopConfigFeatures {
+    #[serde(default)]
+    pub kill_locking_processes: bool,
+
+    #[serde(default)]
+    pub sync_extra_files: bool,
+
+    #[serde(default)]
+    pub permissive_file_opening: bool,
+
+    #[serde(default)]
+    pub enable_file_integrity_monitor: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -176,9 +198,19 @@ pub struct RqbitDesktopConfig {
     pub upnp: RqbitDesktopConfigUpnp,
     pub persistence: RqbitDesktopConfigPersistence,
     pub http_api: RqbitDesktopConfigHttpApi,
+    pub features: RqbitDesktopConfigFeatures,
 
     #[serde(default)]
     pub ratelimits: LimitsConfig,
+
+    /// How many torrents can be hash-checked concurrently on startup.
+    /// Default: 3
+    #[serde(default = "default_concurrent_init_limit")]
+    pub concurrent_init_limit: usize,
+}
+
+fn default_concurrent_init_limit() -> usize {
+    3
 }
 
 impl Default for RqbitDesktopConfig {
@@ -196,7 +228,9 @@ impl Default for RqbitDesktopConfig {
             upnp: Default::default(),
             persistence: Default::default(),
             http_api: Default::default(),
+            features: Default::default(),
             ratelimits: Default::default(),
+            concurrent_init_limit: default_concurrent_init_limit(),
             #[cfg(feature = "disable-upload")]
             disable_upload: false,
         }

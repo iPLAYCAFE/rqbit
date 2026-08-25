@@ -18,7 +18,10 @@ export type TableSortColumn =
   | "upSpeed"
   | "uploadedBytes"
   | "eta"
-  | "peers";
+  | "peers"
+  | "added"
+  | "lastActive"
+  | "remaining";
 
 const DEFAULT_SORT_COLUMN: TableSortColumn = "id";
 const DEFAULT_SORT_DIRECTION: SortDirection = "desc";
@@ -39,7 +42,7 @@ function getTableSortValue(
         ? (t.stats.progress_bytes ?? 0) / t.stats.total_bytes
         : 0;
     case "downloadedBytes":
-      return t.stats?.progress_bytes ?? 0;
+      return t.stats?.total_fetched_bytes ?? 0;
     case "downSpeed":
       return t.stats?.live?.download_speed?.mbps ?? 0;
     case "upSpeed":
@@ -56,6 +59,17 @@ function getTableSortValue(
     }
     case "peers":
       return t.stats?.live?.snapshot.peer_stats?.live ?? 0;
+    case "added":
+      return t.stats?.added_at ?? "";
+    case "lastActive":
+      return t.stats?.last_activity ?? "";
+    case "remaining":
+        {
+            const total = t.stats?.total_bytes ?? 0;
+            const progress = t.stats?.progress_bytes ?? 0;
+            return Math.max(0, total - progress);
+        }
+
   }
 }
 
@@ -114,6 +128,8 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
         return sortDirection === "asc" ? cmp : -cmp;
       });
   }, [torrents, normalizedQuery, statusFilter, sortColumn, sortDirection]);
+
+
 
   // Compute visible IDs for keyboard navigation
   const visibleTorrentIds = useMemo(() => {
@@ -186,22 +202,29 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
     [selectRange, selectTorrent],
   );
 
+  // Use ref for selectedTorrentIds to keep itemContent stable
+  const selectedIdsRef = useRef(selectedTorrentIds);
+  selectedIdsRef.current = selectedTorrentIds;
+
   // Item renderer for react-virtuoso
+  // Stable callback - reads selection from ref to avoid re-creating on selection change
   const itemContent = useCallback(
-    (index: number) => {
-      const torrent = filteredTorrents![index];
+    (index: number, torrent: TorrentListItem) => {
+      if (!torrent) return null;
       return (
         <TorrentTableRow
           key={torrent.id}
           torrent={torrent}
-          isSelected={selectedTorrentIds.has(torrent.id)}
+          isSelected={selectedIdsRef.current.has(torrent.id)}
           onRowClick={handleRowClick}
           onCheckboxChange={toggleSelection}
         />
       );
     },
-    [filteredTorrents, selectedTorrentIds, handleRowClick, toggleSelection],
+    [handleRowClick, toggleSelection],
   );
+
+  const computeItemKey = useCallback((index: number, item: TorrentListItem) => item.id, []);
 
   if (loading) {
     return (
@@ -221,120 +244,146 @@ export const TorrentTable: React.FC<TorrentTableProps> = ({
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full text-sm">
       {/* Header */}
-      <table className="w-full table-fixed">
-        <thead className="bg-surface-raised text-sm">
-          <tr className="border-b border-divider">
-            <th className="w-8 px-2 py-3">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                ref={(el) => {
-                  if (el) el.indeterminate = someSelected && !allSelected;
-                }}
-                onChange={handleHeaderCheckbox}
-                className="w-4 h-4 rounded border-divider-strong bg-surface text-primary focus:ring-primary"
-              />
-            </th>
-            <th className="w-8 px-1 py-3"></th>
-            <TableHeader
-              column="id"
-              label="ID"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-12"
-              align="center"
-            />
-            <TableHeader
-              column="name"
-              label="Name"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              align="left"
-            />
-            <TableHeader
-              column="size"
-              label="Size"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-20"
-              align="right"
-            />
-            <TableHeader
-              column="progress"
-              label="Progress"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-24"
-              align="center"
-            />
-            <TableHeader
-              column="downloadedBytes"
-              label="Recv"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-20"
-              align="right"
-            />
-            <TableHeader
-              column="downSpeed"
-              label="↓ Speed"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-20"
-              align="right"
-            />
-            <TableHeader
-              column="upSpeed"
-              label="↑ Speed"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-20"
-              align="right"
-            />
-            <TableHeader
-              column="uploadedBytes"
-              label="Sent"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-20"
-              align="right"
-            />
-            <TableHeader
-              column="eta"
-              label="ETA"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-20"
-              align="center"
-            />
-            <TableHeader
-              column="peers"
-              label="Peers"
-              sortColumn={sortColumn}
-              sortDirection={sortDirection}
-              onSort={handleSort}
-              className="w-16"
-              align="center"
-            />
-          </tr>
-        </thead>
-      </table>
+      <div className="flex bg-surface-raised border-b border-divider shrink-0">
+        <div className="w-8 px-2 py-3 flex items-center justify-center">
+          <input
+            type="checkbox"
+            checked={allSelected}
+            ref={(el) => {
+              if (el) el.indeterminate = someSelected && !allSelected;
+            }}
+            onChange={handleHeaderCheckbox}
+            className="w-4 h-4 rounded border-divider-strong bg-surface text-primary focus:ring-primary"
+          />
+        </div>
+        <div className="w-8 px-1 py-3"></div>
+        <TableHeader
+          column="id"
+          label="ID"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-12 text-center"
+          align="center"
+        />
+        <TableHeader
+          column="name"
+          label="Name"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="flex-1 min-w-0"
+          align="left"
+        />
+        <TableHeader
+          column="added"
+          label="Added"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-20 text-center"
+          align="center"
+        />
+        <TableHeader
+          column="size"
+          label="Size"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-20 text-right"
+          align="right"
+        />
+        <TableHeader
+          column="progress"
+          label="Progress"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-24 text-center"
+          align="center"
+        />
+        <TableHeader
+          column="downloadedBytes"
+          label="Recv"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-20 text-right"
+          align="right"
+        />
+        <TableHeader
+          column="remaining"
+          label="Rem"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-20 text-right"
+          align="right"
+        />
+        <TableHeader
+          column="downSpeed"
+          label="↓ Speed"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-20 text-right"
+          align="right"
+        />
+        <TableHeader
+          column="upSpeed"
+          label="↑ Speed"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-20 text-right"
+          align="right"
+        />
+        <TableHeader
+          column="uploadedBytes"
+          label="Sent"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-20 text-right"
+          align="right"
+        />
+        <TableHeader
+           column="lastActive"
+           label="Active"
+           sortColumn={sortColumn}
+           sortDirection={sortDirection}
+           onSort={handleSort}
+           className="w-20 text-right text-xs"
+           align="right"
+        />
+        <TableHeader
+          column="eta"
+          label="ETA"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-20 text-center"
+          align="center"
+        />
+        <TableHeader
+          column="peers"
+          label="Peers"
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+          className="w-16 text-center"
+          align="center"
+        />
+      </div>
       {/* Virtualized body */}
       <div className="flex-1 min-h-0">
         <Virtuoso
-          totalCount={filteredTorrents?.length ?? 0}
+          data={filteredTorrents ?? []}
           itemContent={itemContent}
+          computeItemKey={computeItemKey}
+          fixedItemHeight={29}
         />
       </div>
     </div>

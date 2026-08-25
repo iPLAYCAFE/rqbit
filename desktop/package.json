@@ -1,5 +1,5 @@
 {
-  "name": "rqbit",
+  "name": "rqbit-desktop",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-shell": "^2.3.1",
+    "classnames": "^2.5.1",
     "lodash.debounce": "^4.0.8",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

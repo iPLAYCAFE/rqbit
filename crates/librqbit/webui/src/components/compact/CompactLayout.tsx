@@ -4,6 +4,7 @@ import { ActionBar } from "./ActionBar";
 import { TorrentTable } from "./TorrentTable";
 import { DetailPane } from "./DetailPane";
 
+
 const DETAIL_PANE_MIN_HEIGHT = 100;
 const DETAIL_PANE_MAX_HEIGHT = 600;
 const DETAIL_PANE_DEFAULT_HEIGHT = 256;
@@ -57,6 +58,8 @@ export const CompactLayout: React.FC<CompactLayoutProps> = ({
   }, [isDragging]);
 
   const hasTorrents = (torrents?.length ?? 0) > 0;
+
+
 
   return (
     <div ref={containerRef} className="flex flex-col h-full">

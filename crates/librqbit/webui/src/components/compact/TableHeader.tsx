@@ -29,8 +29,8 @@ export const TableHeader: React.FC<TableHeaderProps> = ({
         : "text-left";
 
   return (
-    <th
-      className={`px-2 py-2 text-secondary cursor-pointer hover:text-text select-none whitespace-nowrap ${alignClass} ${className}`}
+    <div
+      className={`px-2 py-2 text-secondary cursor-pointer hover:text-text select-none whitespace-nowrap flex items-center ${alignClass} ${className}`}
       onClick={() => onSort(column)}
     >
       {label}
@@ -39,6 +39,6 @@ export const TableHeader: React.FC<TableHeaderProps> = ({
         sortColumn={sortColumn}
         sortDirection={sortDirection}
       />
-    </th>
+    </div>
   );
 };

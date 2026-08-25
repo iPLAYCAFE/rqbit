@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use crate::{api::TorrentIdOrHash, bitv::BitV, type_aliases::BF};
 
 #[async_trait::async_trait]
@@ -9,6 +11,12 @@ pub trait BitVFactory: Send + Sync {
         id: TorrentIdOrHash,
         b: BF,
     ) -> anyhow::Result<Box<dyn BitV>>;
+
+    /// Returns the modification time of the stored bitfield for the given torrent.
+    /// Used by the startup integrity check to detect files modified while rqbit was shut down.
+    async fn get_mtime(&self, _id: TorrentIdOrHash) -> anyhow::Result<Option<SystemTime>> {
+        Ok(None)
+    }
 }
 
 pub struct NonPersistentBitVFactory {}

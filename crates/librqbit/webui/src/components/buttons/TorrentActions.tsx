@@ -8,6 +8,7 @@ import { useErrorStore } from "../../stores/errorStore";
 import { useTorrentStore } from "../../stores/torrentStore";
 import { useUIStore } from "../../stores/uiStore";
 import { PlaylistIconButton } from "./PlaylistButton";
+import { CopyMagnetButton } from "../CopyMagnetButton";
 
 export const TorrentActions: React.FC<{
   torrent: TorrentListItem & { stats: TorrentStats };
@@ -73,8 +74,12 @@ export const TorrentActions: React.FC<{
     setDeleting(false);
   };
 
+
+
+
   return (
     <div className="flex w-full justify-center gap-1 sm:gap-2 dark:text-slate-300">
+      <CopyMagnetButton torrent={torrent} disabled={disabled} iconClassName="" />
       {canUnpause && (
         <IconButton onClick={unpause} disabled={disabled}>
           <FaPlay className="hover:text-green-600" />

@@ -148,6 +148,9 @@ impl JsonSessionPersistenceStore {
             only_files: torrent.only_files().clone(),
             is_paused: torrent.is_paused(),
             output_folder: torrent.shared().options.output_folder.clone(),
+            added_at: torrent.shared.added_at,
+            total_fetched_bytes: torrent.get_total_fetched_bytes(),
+            last_activity: torrent.get_last_activity(),
         };
 
         let torrent_bytes = torrent
@@ -208,6 +211,19 @@ impl BitVFactory for JsonSessionPersistenceStore {
         tokio::fs::remove_file(&filename)
             .await
             .with_context(|| format!("error removing {filename:?}"))
+    }
+
+    async fn get_mtime(
+        &self,
+        id: TorrentIdOrHash,
+    ) -> anyhow::Result<Option<std::time::SystemTime>> {
+        let h = self.to_hash(id).await?;
+        let filename = self.bitv_filename(&h);
+        match tokio::fs::metadata(&filename).await {
+            Ok(m) => Ok(m.modified().ok()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("error reading bitv metadata: {e:#}")),
+        }
     }
 
     async fn store_initial_check(

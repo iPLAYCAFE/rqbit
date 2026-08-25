@@ -41,13 +41,35 @@ const streamLogs = (
   addLine: (text: string) => void,
   setError: (error: ErrorWithLabel | null) => void,
 ): (() => void) => {
+  let canceled = false;
+  let cleanupTauri: (() => void) | undefined;
+
+  // Handle Tauri Event Stream
+  if (url === "tauri://events") {
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      if (canceled) return;
+      listen<string>("log_line", (event) => {
+        if (canceled) return;
+        addLine(event.payload + "\n");
+      }).then(unlisten => {
+        cleanupTauri = unlisten;
+        if (canceled) unlisten();
+      }).catch(e => {
+        if (canceled) return;
+        setError({ text: "Failed to listen to logs", details: e });
+      });
+    });
+    return () => {
+      canceled = true;
+      if (cleanupTauri) cleanupTauri();
+    };
+  }
+
+  // Handle HTTP Stream
   const controller = new AbortController();
   const signal = controller.signal;
 
-  let canceled = false;
-
   const cancelFetch = () => {
-    console.log("cancelling fetch");
     canceled = true;
     controller.abort();
   };
@@ -91,7 +113,7 @@ const streamLogs = (
 
       buffer = mergeBuffers(buffer, value);
 
-      for (let newLineIdx: number; (newLineIdx = buffer.indexOf(10)) !== -1; ) {
+      for (let newLineIdx: number; (newLineIdx = buffer.indexOf(10)) !== -1;) {
         let lineBytes = buffer.slice(0, newLineIdx);
         let line = new TextDecoder().decode(lineBytes);
         addLine(line);
@@ -103,7 +125,7 @@ const streamLogs = (
   let cancelLoop = loopUntilSuccess(
     () =>
       runOnce().then(
-        () => {},
+        () => { },
         (e) => {
           if (canceled) {
             return;

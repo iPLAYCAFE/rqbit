@@ -9,8 +9,13 @@ export function customSetInterval(
   let timeoutId: any;
   let currentInterval: number = initialInterval;
 
+  let cancelled = false;
+
   const executeCallback = async () => {
     currentInterval = await asyncCallback();
+    if (cancelled) {
+      return;
+    }
     if (currentInterval === null || currentInterval === undefined) {
       throw "asyncCallback returned null or undefined";
     }
@@ -18,12 +23,14 @@ export function customSetInterval(
   };
 
   let scheduleNext = () => {
+    if (cancelled) return;
     timeoutId = setTimeout(executeCallback, currentInterval);
   };
 
   scheduleNext();
 
   return () => {
+    cancelled = true;
     clearTimeout(timeoutId);
   };
 }

@@ -26,6 +26,7 @@ export interface TorrentDetails {
   files: Array<TorrentFile>;
   total_pieces?: number;
   output_folder: string;
+  trackers?: string[];
 }
 
 // Interface for torrent list item (from bulk /torrents?with_stats=true endpoint)
@@ -44,6 +45,7 @@ export interface AddTorrentResponse {
   details: TorrentDetails;
   output_folder: string;
   seen_peers?: Array<string>;
+  already_managed?: boolean;
 }
 
 export interface ListTorrentsResponse {
@@ -168,12 +170,26 @@ export const STATE_ERROR = "error";
 export interface TorrentStats {
   state: "initializing" | "paused" | "live" | "error";
   error: string | null;
-  file_progress: number[];
+  file_progress?: number[];
   progress_bytes: number;
   finished: boolean;
   initializing_paused?: boolean;
   total_bytes: number;
   live: LiveTorrentStats | null;
+  added_at?: string;
+  total_fetched_bytes: number;
+  last_activity?: string;
+}
+
+export interface CreateTorrentTask {
+  id: number;
+  status: "pending" | "processing" | "done";
+  created_at: string;
+  source_path: string;
+  processed_bytes: number;
+  total_bytes: number;
+  error?: string | null;
+  magnet_link?: string;
 }
 
 export interface ErrorDetails {
@@ -205,6 +221,8 @@ export interface AddTorrentOptions {
   force_tracker_interval?: Duration | null;
   initial_peers?: string[] | null; // Assuming SocketAddr is equivalent to a string in TypeScript
   preferred_id?: number | null;
+  skip_initial_check?: boolean | null;
+  sync_extra_files?: boolean | null;
 }
 
 export type Value = string | number | boolean;
@@ -268,6 +286,13 @@ export interface RqbitAPI {
     data: string | File,
     opts?: AddTorrentOptions,
   ) => Promise<AddTorrentResponse>;
+  createTorrent: (
+    path: string,
+    opts?: {
+      name?: string;
+      trackers?: string[];
+    },
+  ) => Promise<AddTorrentResponse>;
 
   pause: (index: number) => Promise<void>;
   updateOnlyFiles: (index: number, files: number[]) => Promise<void>;
@@ -277,4 +302,20 @@ export interface RqbitAPI {
   stats: () => Promise<SessionStats>;
   getLimits: () => Promise<LimitsConfig>;
   setLimits: (limits: LimitsConfig) => Promise<void>;
+
+  createTorrentTask: (
+    path: string,
+    opts?: { name?: string; trackers?: string[] },
+  ) => Promise<number>;
+  listCreateTorrentTasks: () => Promise<CreateTorrentTask[]>;
+  cancelCreateTorrentTask: (id: number) => Promise<void>;
+  deleteCreateTorrentTask: (id: number) => Promise<void>;
+
+  listExtraFiles: (
+    index: number,
+  ) => Promise<{ extra_files: string[] }>;
+  removeExtraFiles: (
+    index: number,
+    files: string[],
+  ) => Promise<{ removed: number; failed: number }>;
 }

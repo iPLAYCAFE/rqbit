@@ -41,12 +41,16 @@ macro_rules! aframe {
 #[macro_use]
 mod stat_gen;
 
+pub mod file_locking;
+pub mod sync_utils;
+
 pub mod api;
 mod api_error;
 mod bitv;
 mod bitv_factory;
 mod chunk_tracker;
 mod create_torrent_file;
+pub mod create_torrent_queue;
 mod dht_utils;
 mod error;
 pub mod file_info;
@@ -87,6 +91,7 @@ pub use error::{Error, Result};
 pub use api::Api;
 pub use api_error::{ApiError, WithStatus, WithStatusError};
 pub use create_torrent_file::{CreateTorrentOptions, CreateTorrentResult, create_torrent};
+pub use create_torrent_queue::{CreateTorrentTask, TorrentCreationManager, TorrentCreationStatus};
 pub use dht;
 pub use librqbit_core::spawn_utils::spawn as librqbit_spawn;
 pub use listen::{ListenerMode, ListenerOptions};

@@ -75,6 +75,7 @@ pub struct TorrentStats {
     // the `initializing` variant.
     #[serde(flatten)]
     pub state: TorrentStatsState,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub file_progress: Vec<u64>,
     pub error: Option<String>,
     pub progress_bytes: u64,
@@ -82,6 +83,9 @@ pub struct TorrentStats {
     pub total_bytes: u64,
     pub finished: bool,
     pub live: Option<LiveStats>,
+    pub added_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub total_fetched_bytes: u64,
+    pub last_activity: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl std::fmt::Display for TorrentStats {
@@ -155,6 +159,9 @@ mod tests {
             total_bytes: 100,
             finished: false,
             live: None,
+            added_at: None,
+            total_fetched_bytes: 0,
+            last_activity: None,
         }
     }
 

@@ -29,7 +29,7 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({
     >
       <ActionBar hideFilters />
       <div className="flex-1 min-h-0">
-        <DetailPane />
+        <DetailPane torrentId={torrentId} />
       </div>
     </Modal>
   );

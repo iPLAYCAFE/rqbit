@@ -23,6 +23,8 @@ pub struct TorrentAddQueryParams {
     // Will force interpreting the content as a URL.
     pub is_url: Option<bool>,
     pub list_only: Option<bool>,
+    pub skip_initial_check: Option<bool>,
+    pub sync_extra_files: Option<bool>,
 }
 
 impl Serialize for OnlyFiles {
@@ -100,13 +102,23 @@ impl TorrentAddQueryParams {
             output_folder: self.output_folder,
             sub_folder: self.sub_folder,
             list_only: self.list_only.unwrap_or(false),
+            skip_initial_check: self.skip_initial_check.unwrap_or(false),
             initial_peers: self.initial_peers.map(|i| i.0),
             peer_opts: Some(PeerConnectionOptions {
                 connect_timeout: self.peer_connect_timeout.map(Duration::from_secs),
                 read_write_timeout: self.peer_read_write_timeout.map(Duration::from_secs),
                 ..Default::default()
             }),
+            sync_extra_files: self.sync_extra_files,
             ..Default::default()
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct AddTorrentRequest {
+    pub url: Option<String>,
+    pub data_base64: Option<String>,
+    #[serde(flatten)]
+    pub opts: TorrentAddQueryParams,
 }

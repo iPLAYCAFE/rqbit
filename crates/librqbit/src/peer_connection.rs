@@ -4,6 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_READ_WRITE_TIMEOUT: Duration = Duration::from_secs(150);
+
 use crate::{Error, Result, session::CheckedIncomingConnection, stream_connect::ConnectionKind};
 use buffers::{ByteBuf, ByteBufOwned};
 use futures::TryFutureExt;
@@ -154,7 +157,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
         let rwtimeout = self
             .options
             .read_write_timeout
-            .unwrap_or_else(|| Duration::from_secs(10));
+            .unwrap_or(DEFAULT_READ_WRITE_TIMEOUT);
 
         if incoming.handshake.info_hash != self.info_hash {
             return Err(Error::WrongInfoHash);
@@ -209,12 +212,12 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
         let rwtimeout = self
             .options
             .read_write_timeout
-            .unwrap_or_else(|| Duration::from_secs(10));
+            .unwrap_or(DEFAULT_READ_WRITE_TIMEOUT);
 
         let connect_timeout = self
             .options
             .connect_timeout
-            .unwrap_or_else(|| Duration::from_secs(10));
+            .unwrap_or(DEFAULT_CONNECT_TIMEOUT);
 
         let now = Instant::now();
         let (ckind, mut read, mut write) = with_timeout(
@@ -288,7 +291,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
         let rwtimeout = self
             .options
             .read_write_timeout
-            .unwrap_or_else(|| Duration::from_secs(10));
+            .unwrap_or(DEFAULT_READ_WRITE_TIMEOUT);
 
         let extended_handshake: RwLock<Option<PeerExtendedMessageIds>> = RwLock::new(None);
         let extended_handshake_ref = &extended_handshake;

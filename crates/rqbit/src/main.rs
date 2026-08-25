@@ -142,11 +142,11 @@ struct Opts {
     dht_bootstrap_addrs: Option<String>,
 
     /// The connect timeout, e.g. 1s, 1.5s, 100ms etc.
-    #[arg(long = "peer-connect-timeout", value_parser = parse_duration::parse, default_value="2s", env="RQBIT_PEER_CONNECT_TIMEOUT")]
+    #[arg(long = "peer-connect-timeout", value_parser = parse_duration::parse, default_value="10s", env="RQBIT_PEER_CONNECT_TIMEOUT")]
     peer_connect_timeout: Duration,
 
     /// The timeout for read() and write() operations, e.g. 1s, 1.5s, 100ms etc.
-    #[arg(long = "peer-read-write-timeout" , value_parser = parse_duration::parse, default_value="10s", env="RQBIT_PEER_READ_WRITE_TIMEOUT")]
+    #[arg(long = "peer-read-write-timeout" , value_parser = parse_duration::parse, default_value="150s", env="RQBIT_PEER_READ_WRITE_TIMEOUT")]
     peer_read_write_timeout: Duration,
 
     /// The maximum number of connected peers per torrent.
@@ -691,6 +691,12 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
         runtime_worker_threads: Some(opts.max_blocking_threads as usize),
         ipv4_only: opts.ipv4_only,
         client_name_and_version: None,
+        kill_locking_processes: false,
+        sync_extra_files: false,
+        skip_hash_check: false,
+        permissive_file_opening: None,
+        enable_file_integrity_monitor: false,
+        peer_pruning_max: None,
     };
 
     #[allow(clippy::needless_update)]
@@ -971,7 +977,7 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
                 .create_and_serve_torrent(
                     &path,
                     CreateTorrentOptions {
-                        name: share_opts.name.as_deref(),
+                        name: share_opts.name.clone(),
                         trackers,
                         ..Default::default()
                     },

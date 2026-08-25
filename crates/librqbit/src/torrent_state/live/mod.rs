@@ -50,7 +50,7 @@ use std::{
     num::NonZeroU32,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -214,6 +214,11 @@ pub struct TorrentStateLive {
         ChunkInfo,
     )>,
     ratelimits: Limits,
+    last_activity: AtomicI64,
+
+    /// Baseline file metadata captured after initial_check.
+    /// Used by the integrity monitor to detect external modifications during seeding.
+    baseline_file_metadata: parking_lot::Mutex<Vec<Option<(std::time::SystemTime, u64)>>>,
 }
 
 impl TorrentStateLive {
@@ -257,6 +262,15 @@ impl TorrentStateLive {
         )>();
         let ratelimits = Limits::new(paused.shared.options.ratelimits);
 
+        // Capture file metadata baseline before moving paused.files
+        // Only when file integrity monitor is enabled
+        let baseline = if paused.shared.options.enable_file_integrity_monitor {
+            paused.files.file_metadata().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let file_count = baseline.len();
+
         let state = Arc::new(TorrentStateLive {
             shared: paused.shared.clone(),
             metadata: paused.metadata.clone(),
@@ -295,6 +309,8 @@ impl TorrentStateLive {
                 .collect(),
             ratelimit_upload_tx,
             ratelimits,
+            last_activity: AtomicI64::new(0),
+            baseline_file_metadata: parking_lot::Mutex::new(baseline),
         });
 
         state.spawn(
@@ -303,6 +319,8 @@ impl TorrentStateLive {
             {
                 let state = Arc::downgrade(&state);
                 async move {
+                    let mut prev_fetched = 0;
+                    let mut prev_uploaded = 0;
                     loop {
                         let state = match state.upgrade() {
                             Some(state) => state,
@@ -311,6 +329,8 @@ impl TorrentStateLive {
                         let now = Instant::now();
                         let stats = state.stats_snapshot();
                         let fetched = stats.fetched_bytes;
+                        let uploaded = stats.uploaded_bytes;
+
                         let remaining = state
                             .lock_read("get_remaining_bytes")
                             .get_chunks()?
@@ -318,9 +338,16 @@ impl TorrentStateLive {
                         state
                             .down_speed_estimator
                             .add_snapshot(fetched, Some(remaining), now);
-                        state
-                            .up_speed_estimator
-                            .add_snapshot(stats.uploaded_bytes, None, now);
+                        state.up_speed_estimator.add_snapshot(uploaded, None, now);
+
+                        if fetched > prev_fetched || uploaded > prev_uploaded {
+                            state
+                                .last_activity
+                                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                        }
+                        prev_fetched = fetched;
+                        prev_uploaded = uploaded;
+
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
@@ -338,6 +365,125 @@ impl TorrentStateLive {
             format!("[{}]upload_scheduler", state.shared.id),
             state.clone().task_upload_scheduler(ratelimit_upload_rx),
         );
+
+        state.spawn(
+            debug_span!(parent: state.shared.span.clone(), "peer_pruner"),
+            format!("[{}]peer_pruner", state.shared.id),
+            {
+                let state = Arc::downgrade(&state);
+                async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        let state = match state.upgrade() {
+                            Some(state) => state,
+                            None => return Ok(()),
+                        };
+                        let max = state.shared.options.peer_pruning_max.unwrap_or(2000);
+                        state.peers.prune_peers(max);
+                    }
+                }
+            },
+        );
+
+        // File integrity monitor — detects externally modified files while seeding
+        // Only enabled when explicitly requested via enable_file_integrity_monitor option
+        if state.shared.options.enable_file_integrity_monitor {
+            state.spawn(
+                debug_span!(parent: state.shared.span.clone(), "file_integrity_monitor"),
+                format!("[{}]file_integrity_monitor", state.shared.id),
+                {
+                    let state = Arc::downgrade(&state);
+                    async move {
+                        // Adaptive interval: scale with file count to avoid excessive stat() calls
+                        let interval = Duration::from_secs(match file_count {
+                            0..=1_000 => 60,        // normal torrents: 60s
+                            1_001..=10_000 => 120,   // large torrents: 2min
+                            10_001..=50_000 => 180,  // very large: 3min
+                            _ => 300,                // massive (>50K files): 5min
+                        });
+                        let mut checked_since_idle = false;
+
+                        loop {
+                            tokio::time::sleep(interval).await;
+
+                            let state = match state.upgrade() {
+                                Some(s) => s,
+                                None => return Ok(()),
+                            };
+
+                            // Only monitor finished (seeding) torrents
+                            if !state.is_finished() {
+                                continue;
+                            }
+
+                            // Smart polling: skip idle torrents (no connected peers)
+                            let live_peers = state.peers.stats().live;
+                            if live_peers == 0 {
+                                checked_since_idle = false;
+                                continue;
+                            }
+
+                            // First peer arrived after idle — immediate check
+                            if !checked_since_idle {
+                                checked_since_idle = true;
+                            }
+
+                            // Compare current file metadata against baseline
+                            let current = match state.files.file_metadata() {
+                                Ok(m) => m,
+                                Err(_) => continue, // non-filesystem storage, skip
+                            };
+
+                            let error_msg = {
+                                let baseline = state.baseline_file_metadata.lock();
+
+                                let mut msg: Option<String> = None;
+
+                                for (idx, (base, cur)) in baseline.iter().zip(current.iter()).enumerate() {
+                                    if base != cur {
+                                        let filename = state.metadata.file_infos
+                                            .get(idx)
+                                            .map(|fi| fi.relative_filename.display().to_string())
+                                            .unwrap_or_else(|| format!("file #{idx}"));
+                                        warn!(
+                                            file = %filename,
+                                            "File modified externally while seeding — pausing torrent to prevent serving corrupted data"
+                                        );
+                                        msg = Some(format!(
+                                            "File '{}' was modified externally. \
+                                             Torrent paused to prevent serving corrupted data. \
+                                             Use Force Recheck to verify and resume.",
+                                            filename
+                                        ));
+                                        break;
+                                    }
+                                }
+
+                                // Also detect if files were deleted (current shorter than baseline)
+                                if msg.is_none() && current.len() < baseline.len() {
+                                    warn!("Torrent files deleted while seeding — pausing torrent");
+                                    msg = Some(
+                                        "Torrent files were deleted externally. \
+                                         Torrent paused to prevent serving corrupted data. \
+                                         Use Force Recheck to verify and resume.".to_string()
+                                    );
+                                }
+
+                                msg
+                                // baseline lock dropped here
+                            };
+
+                            if let Some(error_msg) = error_msg {
+                                // Use on_fatal_error to trigger actual pause via fatal_errors_tx channel
+                                let _ = state.on_fatal_error(anyhow::anyhow!("{}", error_msg));
+                                return Ok(());
+                            }
+                        }
+                    }
+                },
+            );
+        }
+
         Ok(state)
     }
 
@@ -529,11 +675,18 @@ impl TorrentStateLive {
         permit: OwnedSemaphorePermit,
     ) -> crate::Result<()> {
         let state = self;
-        let (rx, tx) = state.peers.mark_peer_connecting(addr)?;
+        let (rx, tx) = match state.peers.mark_peer_connecting(addr) {
+            Ok(r) => r,
+            Err(Error::PeerNotFound) => {
+                debug!(addr=%addr, "peer pruned before connection attempt");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
         let counters = state
             .peers
             .with_peer(addr, |p| p.stats.counters.clone())
-            .ok_or(Error::BugPeerNotFound)?;
+            .ok_or(Error::PeerNotFound)?;
 
         let handler = PeerHandler {
             addr,
@@ -704,6 +857,16 @@ impl TorrentStateLive {
             .load(Ordering::Acquire)
     }
 
+    pub fn get_last_activity(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        use chrono::TimeZone;
+        let val = self.last_activity.load(Ordering::Relaxed);
+        if val == 0 {
+            None
+        } else {
+            Some(chrono::Utc.timestamp_millis_opt(val).unwrap())
+        }
+    }
+
     pub fn get_approx_have_bytes(&self) -> u64 {
         self.stats.have_bytes.load(Ordering::Relaxed)
     }
@@ -868,7 +1031,43 @@ impl TorrentStateLive {
             if chunks.get_selected_pieces()[id.get_usize()] {
                 locked.try_flush_bitv(&self.shared, false);
                 info!(id=self.shared.id, info_hash=?self.shared.info_hash, "torrent finished downloading");
+
+                // Refresh file integrity baseline now that all pieces are
+                // written.  Without this, the monitor sees download-caused
+                // mtime changes as "external modification" and pauses the
+                // torrent with a false positive.
+                if self.shared.options.enable_file_integrity_monitor
+                    && let Ok(meta) = self.files.file_metadata()
+                {
+                    *self.baseline_file_metadata.lock() = meta;
+                }
             }
+
+            if self.shared.options.sync_extra_files {
+                let info = self.metadata.clone();
+                let shared = self.shared.clone();
+                self.spawn(
+                    debug_span!(parent: shared.span.clone(), "sync_extra_files"),
+                    "sync_extra_files",
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            use crate::sync_utils::remove_extra_files;
+                            info!("Starting auto-removal of extra files...");
+                            if let Err(e) =
+                                remove_extra_files(info.info.info(), &shared.options.output_folder)
+                            {
+                                warn!("Error in auto-removal: {:#}", e);
+                            } else {
+                                info!("Auto-removal complete.");
+                            }
+                        })
+                        .await
+                        .context("spawn_blocking failed")
+                        .map_err(crate::Error::Anyhow)
+                    },
+                );
+            }
+
             self.finished_notify.notify_waiters();
 
             if !self.has_active_streams_unfinished_files(locked) {
@@ -1873,6 +2072,10 @@ impl PeerHandler {
                         error!(
                             id = state.shared.id,
                             info_hash = ?state.shared.info_hash,
+                            piece = index,
+                            chunk_offset = chunk_info.offset,
+                            chunk_size = chunk_info.size,
+                            peer = ?addr,
                             "FATAL: error writing chunk to disk: {e:#}"
                         );
                         return state.on_fatal_error(e);
@@ -2091,4 +2294,183 @@ fn format_peer_client_name(value: &ByteBuf<'_>) -> Option<String> {
     }
 
     Some(client_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compute the file integrity monitor polling interval based on file count.
+    /// Scales logarithmically to avoid excessive stat() calls on large torrents.
+    fn compute_monitor_interval(file_count: usize) -> Duration {
+        Duration::from_secs(match file_count {
+            0..=1_000 => 60,        // normal torrents: 60s
+            1_001..=10_000 => 120,  // large torrents: 2min
+            10_001..=50_000 => 180, // very large: 3min
+            _ => 300,               // massive (>50K files): 5min
+        })
+    }
+
+    /// Result of a file integrity check comparing current metadata against a baseline.
+    #[derive(Debug, PartialEq)]
+    enum IntegrityCheckResult {
+        /// All files match the baseline.
+        Ok,
+        /// A file was modified (index, filename).
+        FileModified(usize, String),
+        /// Files were deleted (current count < baseline count).
+        FilesDeleted,
+    }
+
+    /// Compare current file metadata against a baseline to detect external modifications.
+    /// This is the core comparison logic used by both the runtime monitor and tests.
+    fn check_file_integrity(
+        baseline: &[Option<(std::time::SystemTime, u64)>],
+        current: &[Option<(std::time::SystemTime, u64)>],
+        file_names: &[String],
+    ) -> IntegrityCheckResult {
+        for (idx, (base, cur)) in baseline.iter().zip(current.iter()).enumerate() {
+            if base != cur {
+                let filename = file_names
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("file #{idx}"));
+                return IntegrityCheckResult::FileModified(idx, filename);
+            }
+        }
+
+        if current.len() < baseline.len() {
+            return IntegrityCheckResult::FilesDeleted;
+        }
+
+        IntegrityCheckResult::Ok
+    }
+
+    // ── compute_monitor_interval tests ────────────────────────────────
+
+    #[test]
+    fn test_interval_small_torrent() {
+        assert_eq!(compute_monitor_interval(0), Duration::from_secs(60));
+        assert_eq!(compute_monitor_interval(1), Duration::from_secs(60));
+        assert_eq!(compute_monitor_interval(100), Duration::from_secs(60));
+        assert_eq!(compute_monitor_interval(1_000), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_interval_large_torrent() {
+        assert_eq!(compute_monitor_interval(1_001), Duration::from_secs(120));
+        assert_eq!(compute_monitor_interval(5_000), Duration::from_secs(120));
+        assert_eq!(compute_monitor_interval(10_000), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_interval_very_large_torrent() {
+        assert_eq!(compute_monitor_interval(10_001), Duration::from_secs(180));
+        assert_eq!(compute_monitor_interval(50_000), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn test_interval_massive_torrent() {
+        assert_eq!(compute_monitor_interval(50_001), Duration::from_secs(300));
+        assert_eq!(compute_monitor_interval(100_000), Duration::from_secs(300));
+    }
+
+    // ── check_file_integrity tests ────────────────────────────────────
+
+    fn t(secs: u64) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn test_integrity_ok_when_matching() {
+        let baseline = vec![Some((t(1000), 512)), Some((t(2000), 1024))];
+        let names = vec!["a.txt".into(), "b.txt".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &baseline, &names),
+            IntegrityCheckResult::Ok,
+        );
+    }
+
+    #[test]
+    fn test_integrity_detects_size_change() {
+        let baseline = vec![Some((t(1000), 512))];
+        let current = vec![Some((t(1000), 1024))]; // size changed
+        let names = vec!["data.bin".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FileModified(0, "data.bin".into()),
+        );
+    }
+
+    #[test]
+    fn test_integrity_detects_mtime_change() {
+        let baseline = vec![Some((t(1000), 512))];
+        let current = vec![Some((t(9999), 512))]; // mtime changed, size same
+        let names = vec!["data.bin".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FileModified(0, "data.bin".into()),
+        );
+    }
+
+    #[test]
+    fn test_integrity_detects_deleted_files() {
+        let baseline = vec![
+            Some((t(1000), 512)),
+            Some((t(2000), 1024)),
+            Some((t(3000), 256)),
+        ];
+        let current = vec![Some((t(1000), 512))]; // 2 files deleted
+        let names = vec!["a.txt".into(), "b.txt".into(), "c.txt".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FilesDeleted,
+        );
+    }
+
+    #[test]
+    fn test_integrity_detects_modification_in_second_file() {
+        let baseline = vec![Some((t(1000), 512)), Some((t(2000), 1024))];
+        let current = vec![
+            Some((t(1000), 512)),  // unchanged
+            Some((t(2000), 2048)), // size changed
+        ];
+        let names = vec!["ok.txt".into(), "changed.txt".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FileModified(1, "changed.txt".into()),
+        );
+    }
+
+    #[test]
+    fn test_integrity_handles_none_entries() {
+        // Padding files (None) should match if both are None
+        let baseline = vec![None, Some((t(1000), 512))];
+        let current = vec![None, Some((t(1000), 512))];
+        let names = vec!["padding".into(), "data.bin".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::Ok,
+        );
+    }
+
+    #[test]
+    fn test_integrity_detects_file_appearing_where_none_was() {
+        // A file appeared where there was None (padding became a real file = corruption)
+        let baseline: Vec<Option<(std::time::SystemTime, u64)>> = vec![None];
+        let current = vec![Some((t(5000), 100))];
+        let names = vec!["unexpected.bin".into()];
+        assert_eq!(
+            check_file_integrity(&baseline, &current, &names),
+            IntegrityCheckResult::FileModified(0, "unexpected.bin".into()),
+        );
+    }
+
+    #[test]
+    fn test_integrity_empty_baseline_and_current() {
+        assert_eq!(
+            check_file_integrity(&[], &[], &[]),
+            IntegrityCheckResult::Ok,
+        );
+    }
 }

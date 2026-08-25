@@ -24,6 +24,9 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<ErrorWithLabel | null>(null);
+  
+  const [autoStart, setAutoStart] = useState(false);
+  const [initAutoStart, setInitAutoStart] = useState(false);
 
   const API = useContext(APIContext);
 
@@ -41,6 +44,21 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
         .finally(() => setLoading(false));
     }
   }, [isOpen, API]);
+
+  useEffect(() => {
+    import("@tauri-apps/plugin-autostart").then(async (autostart) => {
+      try {
+        if (await autostart.isEnabled()) {
+            setAutoStart(true);
+        }
+        setInitAutoStart(true);
+      } catch (e) {
+          console.error("Autostart check failed", e);
+      }
+    }).catch(e => {
+        console.error("Failed to load autostart plugin", e);
+    });
+  }, []);
 
   const handleSave = async () => {
     setSaving(true);
@@ -66,6 +84,23 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
       </Modal>
     );
   }
+
+
+  const toggleAutoStart = async () => {
+    try {
+      const autostart = await import("@tauri-apps/plugin-autostart");
+      if (autoStart) {
+        await autostart.disable();
+        setAutoStart(false);
+      } else {
+        await autostart.enable();
+        setAutoStart(true);
+      }
+    } catch (e) {
+      console.error("Failed to toggle auto start", e);
+      setError({ text: "Failed to toggle auto start", details: e as any });
+    }
+  };
 
   return (
     <TabbedConfigModal
@@ -94,6 +129,23 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
           label: "Other",
           content: (
             <div className="text-secondary py-2">
+              <div className="mb-4">
+                  <h3 className="text-lg font-medium mb-2">System</h3>
+                  <div className="flex items-center gap-2">
+                      <input
+                          type="checkbox"
+                          id="autostart"
+                          checked={autoStart}
+                          onChange={toggleAutoStart}
+                          disabled={!initAutoStart}
+                          className="w-4 h-4 rounded border-divider-strong bg-surface text-primary focus:ring-primary"
+                      />
+                      <label htmlFor="autostart" className="cursor-pointer select-none">
+                          Start at login
+                      </label>
+                  </div>
+              </div>
+
               <p>
                 All other parameters (DHT, connections, persistence, etc.) can
                 be configured via{" "}

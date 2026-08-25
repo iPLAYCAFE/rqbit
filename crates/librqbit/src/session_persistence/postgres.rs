@@ -41,6 +41,9 @@ impl TorrentsTableRecord {
                     .only_files
                     .map(|v| v.into_iter().map(|v| v as usize).collect()),
                 is_paused: self.is_paused,
+                added_at: None,
+                last_activity: None,
+                total_fetched_bytes: 0,
             },
         ))
     }

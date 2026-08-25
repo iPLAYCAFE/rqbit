@@ -1,5 +1,6 @@
 name: Release binaries for Windows
 
+# Windows uses GitHub-hosted runners (Ubicloud is Linux-only).
 on:
   push:
     tags:

@@ -25,7 +25,6 @@ type FileTree = {
 
 const newFileTree = (
   torrentDetails: TorrentDetails,
-  stats: TorrentStats | null,
 ): FileTree => {
   const newFileTreeInner = (
     name: string,
@@ -83,7 +82,7 @@ const newFileTree = (
           filename: file.components[file.components.length - 1],
           pathComponents: file.components,
           length: file.length,
-          have_bytes: stats ? (stats.file_progress[id] ?? 0) : 0,
+          have_bytes: 0, // Will be filled in at render time from stats
         };
       })
       .filter((f) => f !== null),
@@ -218,12 +217,15 @@ const FileTreeComponent: React.FC<{
                 onChange={() => handleToggleFile(file.id)}
                 labelLink={fileLink(file)}
               ></FormCheckbox>
-              {showProgressBar && (
-                <ProgressBar
-                  now={(file.have_bytes / file.length) * 100}
-                  variant={file.have_bytes == file.length ? "success" : "info"}
-                />
-              )}
+              {showProgressBar && (() => {
+                const haveBytes = torrentStats?.file_progress ? (torrentStats.file_progress[file.id] ?? 0) : file.have_bytes;
+                return (
+                  <ProgressBar
+                    now={(haveBytes / file.length) * 100}
+                    variant={haveBytes >= file.length ? "success" : "info"}
+                  />
+                );
+              })()}
             </div>
           ))}
         </div>
@@ -252,8 +254,15 @@ export const FileListInput: React.FC<{
   allowStream,
 }) => {
   let fileTree = useMemo(
-    () => newFileTree(torrentDetails, torrentStats),
-    [torrentDetails, torrentStats],
+    () => {
+        try {
+            return newFileTree(torrentDetails);
+        } catch (e: any) {
+            console.error(`Error generating file tree: ${e.message}`);
+            throw e;
+        }
+    },
+    [torrentDetails],
   );
 
   return (

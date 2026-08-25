@@ -1,4 +1,5 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
+// Force rebuild
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
@@ -14,20 +15,23 @@ use anyhow::Context;
 use config::RqbitDesktopConfig;
 use http::StatusCode;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, Api, ApiError, DhtSessionConfig, Session, SessionOptions,
-    SessionPersistenceConfig, WithStatusError,
+    AddTorrent, AddTorrentOptions, Api, ApiError, CreateTorrentOptions, DhtSessionConfig, Session,
+    SessionOptions, SessionPersistenceConfig, WithStatusError,
     api::{
-        ApiAddTorrentResponse, ApiTorrentListOpts, EmptyJsonResponse, TorrentDetailsResponse,
-        TorrentIdOrHash, TorrentListResponse, TorrentStats,
+        ApiAddTorrentResponse, ApiTorrentListOpts, DeleteExtraFilesResponse, EmptyJsonResponse,
+        ListExtraFilesResponse, TorrentDetailsResponse, TorrentIdOrHash, TorrentListResponse,
+        TorrentStats,
     },
     dht::DhtPersistenceConfig,
     http_api_types::{PeerStatsFilter, PeerStatsSnapshot},
+    limits::LimitsConfig,
     session_stats::snapshot::SessionStatsSnapshot,
     tracing_subscriber_config_utils::{InitLoggingOptions, InitLoggingResult, init_logging},
 };
 use librqbit_dualstack_sockets::TcpListener;
 use parking_lot::RwLock;
 use serde::Serialize;
+use tauri::Emitter;
 use tracing::{debug_span, error, info, warn};
 
 struct StateShared {
@@ -87,7 +91,14 @@ async fn api_from_config(
 
     let mut http_api_opts = librqbit::http_api::HttpApiOptions {
         read_only: config.http_api.read_only,
-        basic_auth: None,
+        basic_auth: if let Some(up) = &config.http_api.basic_auth {
+            let (u, p) = up
+                .split_once(":")
+                .context("basic auth credentials should be in format username:password")?;
+            Some((u.to_owned(), p.to_owned()))
+        } else {
+            None
+        },
         ..Default::default()
     };
 
@@ -128,9 +139,15 @@ async fn api_from_config(
             connect: Some(connect),
             listen,
             fastresume: config.persistence.fastresume,
+            skip_hash_check: config.persistence.skip_hash_check,
             ratelimits: config.ratelimits,
             #[cfg(feature = "disable-upload")]
             disable_upload: config.disable_upload,
+            kill_locking_processes: config.features.kill_locking_processes,
+            sync_extra_files: config.features.sync_extra_files,
+            permissive_file_opening: Some(config.features.permissive_file_opening),
+            enable_file_integrity_monitor: config.features.enable_file_integrity_monitor,
+            concurrent_init_limit: Some(config.concurrent_init_limit),
             ..Default::default()
         },
     )
@@ -188,29 +205,38 @@ async fn api_from_config(
 
 impl State {
     async fn new(init_logging: InitLoggingResult) -> Self {
-        let config_filename = directories::ProjectDirs::from("com", "rqbit", "desktop")
-            .expect("directories::ProjectDirs::from")
-            .config_dir()
-            .join("config.json")
-            .to_str()
-            .expect("to_str()")
-            .to_owned();
+        let config_path = get_config_path();
+        let config_filename = config_path.to_str().expect("to_str()").to_owned();
 
-        if let Ok(config) = read_config(&config_filename) {
-            let api = api_from_config(&init_logging, &config)
-                .await
-                .map_err(|e| {
-                    warn!(error=?e, "error reading configuration");
-                    e
-                })
-                .ok();
-            let shared = Arc::new(RwLock::new(Some(StateShared { config, api })));
+        if config_path.exists() {
+            info!("Using config: {:?}", config_path);
+        } else {
+            info!("Config not found at {:?}, using defaults", config_path);
+        }
 
-            return Self {
-                config_filename,
-                shared,
-                init_logging,
-            };
+        match read_config(&config_filename) {
+            Ok(config) => {
+                let api = api_from_config(&init_logging, &config)
+                    .await
+                    .map_err(|e| {
+                        warn!(error=?e, "error reading configuration");
+                        e
+                    })
+                    .ok();
+                let shared = Arc::new(RwLock::new(Some(StateShared { config, api })));
+
+                return Self {
+                    config_filename,
+                    shared,
+                    init_logging,
+                };
+            }
+            Err(e) => {
+                warn!(
+                    "failed reading config from {:?}: {:#}, starting unconfigured",
+                    config_filename, e
+                );
+            }
         }
 
         Self {
@@ -412,11 +438,66 @@ async fn stats(state: tauri::State<'_, State>) -> Result<SessionStatsSnapshot, A
 
 #[tauri::command]
 fn get_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    env!("RQBIT_VERSION")
+}
+
+#[tauri::command]
+fn get_limits(state: tauri::State<State>) -> Result<LimitsConfig, ApiError> {
+    Ok(state.api()?.session().ratelimits.get_config())
+}
+
+#[tauri::command]
+fn set_limits(state: tauri::State<State>, limits: LimitsConfig) -> Result<(), ApiError> {
+    let api = state.api()?;
+    api.session().ratelimits.set_upload_bps(limits.upload_bps);
+    api.session()
+        .ratelimits
+        .set_download_bps(limits.download_bps);
+
+    // Attempt to persist
+    let mut g = state.shared.write();
+    if let Some(shared) = g.as_mut() {
+        shared.config.ratelimits = limits;
+        if let Err(e) = write_config(&state.config_filename, &shared.config) {
+            error!("error writing config: {:#}", e);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the path to the configuration file.
+///
+/// First checks for a portable `config.json` next to the executable,
+/// falling back to the platform-specific config directory.
+fn get_config_path() -> std::path::PathBuf {
+    // Portable mode: check if config.json exists in the same directory as the executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let portable_config = exe_dir.join("config.json");
+            if portable_config.exists() {
+                return portable_config;
+            }
+        }
+    }
+
+    directories::ProjectDirs::from("com", "rqbit", "desktop")
+        .expect("directories::ProjectDirs::from")
+        .config_dir()
+        .join("config.json")
 }
 
 async fn start() {
     tauri::async_runtime::set(tokio::runtime::Handle::current());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    info!(
+        "BOOT SEQUENCE INITIATED: v{} TS:{}",
+        env!("CARGO_PKG_VERSION"),
+        now
+    );
+
     let init_logging_result = init_logging(InitLoggingOptions {
         default_rust_log_value: Some("info"),
         log_file: None,
@@ -430,10 +511,113 @@ async fn start() {
         Err(e) => warn!("failed increasing open file limit: {:#}", e),
     };
 
+    let line_broadcast = init_logging_result.line_broadcast.clone();
     let state = State::new(init_logging_result).await;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                window.hide().unwrap();
+                api.prevent_close();
+            }
+        })
+        .setup(move |app| {
+            use tauri::Manager;
+            use tauri::menu::{CheckMenuItem, Menu, MenuItem};
+            use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+            use tauri_plugin_autostart::ManagerExt;
+
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).ok();
+            let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>).ok();
+            let autostart_i = CheckMenuItem::with_id(
+                app,
+                "autostart",
+                "Start at Login",
+                true,
+                false,
+                None::<&str>,
+            )
+            .ok();
+
+            if let (Some(quit_i), Some(show_i), Some(autostart_i)) = (quit_i, show_i, autostart_i) {
+                // Check current autostart status
+                if let Ok(true) = app.autolaunch().is_enabled() {
+                    let _ = autostart_i.set_checked(true);
+                }
+
+                let menu = Menu::with_items(app, &[&show_i, &autostart_i, &quit_i]);
+                if let Ok(menu) = menu {
+                    let _ = TrayIconBuilder::new()
+                        .icon(app.default_window_icon().unwrap().clone())
+                        .tooltip(format!("rqbit v{}", env!("RQBIT_VERSION")))
+                        .menu(&menu)
+                        .on_menu_event(move |app, event| match event.id().as_ref() {
+                            "quit" => {
+                                app.exit(0);
+                            }
+                            "show" => {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                            "autostart" => {
+                                let enabled = app.autolaunch().is_enabled().unwrap_or(false);
+                                if enabled {
+                                    let _ = app.autolaunch().disable();
+                                    let _ = autostart_i.set_checked(false);
+                                } else {
+                                    let _ = app.autolaunch().enable();
+                                    let _ = autostart_i.set_checked(true);
+                                }
+                            }
+                            _ => {}
+                        })
+                        .on_tray_icon_event(
+                            |tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent| {
+                                if let TrayIconEvent::Click {
+                                    button: MouseButton::Left,
+                                    ..
+                                } = event
+                                {
+                                    let app = tray.app_handle();
+                                    if let Some(window) = app.get_webview_window("main") {
+                                        let _ = window.show();
+                                        let _ = window.set_focus();
+                                    }
+                                }
+                            },
+                        )
+                        .build(app);
+                }
+            }
+
+            // Force show window on startup
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+
+            // Spawn log broadcaster
+            let mut rx = line_broadcast.subscribe();
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Ok(line) = rx.recv().await {
+                    if let Ok(line_str) = std::str::from_utf8(&line) {
+                        let _ = app_handle.emit("log_line", line_str);
+                    }
+                }
+            });
+
+            Ok(())
+        })
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             config_change,
@@ -446,6 +630,7 @@ async fn start() {
             torrent_action_forget,
             torrent_action_pause,
             torrent_action_start,
+            torrent_create,
             torrent_create_from_base64_file,
             torrent_create_from_url,
             torrent_details,
@@ -453,9 +638,126 @@ async fn start() {
             torrent_peer_stats,
             torrent_stats,
             torrents_list,
+            get_limits,
+            set_limits,
+            torrent_create_task_enqueue,
+            torrent_create_task_list,
+            torrent_create_task_cancel,
+            torrent_create_task_delete,
+            torrent_list_extra_files,
+            torrent_delete_extra_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[tauri::command]
+async fn torrent_create(
+    state: tauri::State<'_, State>,
+    _window: tauri::Window,
+    path: String,
+    name: Option<String>,
+    trackers: Option<Vec<String>>,
+) -> Result<ApiAddTorrentResponse, ApiError> {
+    let opts = CreateTorrentOptions {
+        name: name,
+        trackers: trackers.unwrap_or_default(),
+        piece_length: None,
+        progress: None,
+    };
+    let path = std::path::PathBuf::from(path);
+    let api = state.api()?;
+
+    let (_meta, handle) = api
+        .session()
+        .create_and_serve_torrent(&path, opts)
+        .await
+        .map_err(ApiError::from)?;
+
+    let details = api.api_torrent_details(librqbit::api::TorrentIdOrHash::Id(handle.id()))?;
+
+    Ok(ApiAddTorrentResponse {
+        id: Some(handle.id()),
+        output_folder: details.output_folder.clone(),
+        details,
+        seen_peers: None,
+        already_managed: false,
+    })
+}
+
+#[tauri::command]
+async fn torrent_create_task_enqueue(
+    state: tauri::State<'_, State>,
+    path: String,
+    name: Option<String>,
+    trackers: Option<Vec<String>>,
+) -> Result<serde_json::Value, ApiError> {
+    let opts = CreateTorrentOptions {
+        name,
+        trackers: trackers.unwrap_or_default(),
+        piece_length: None,
+        progress: None,
+    };
+    let id = state
+        .api()?
+        .session()
+        .torrent_creation_manager
+        .enqueue(std::path::PathBuf::from(path), opts)
+        .context("error enqueueing")
+        .map_err(ApiError::from)?;
+    Ok(serde_json::json!({ "id": id }))
+}
+
+#[tauri::command]
+async fn torrent_create_task_list(
+    state: tauri::State<'_, State>,
+) -> Result<Vec<serde_json::Value>, ApiError> {
+    let tasks = state.api()?.session().torrent_creation_manager.list();
+    let tasks: Vec<_> = tasks
+        .iter()
+        .map(|t| serde_json::to_value(&*t.read()).unwrap_or(serde_json::Value::Null))
+        .collect();
+    Ok(tasks)
+}
+
+#[tauri::command]
+async fn torrent_create_task_cancel(
+    state: tauri::State<'_, State>,
+    id: usize,
+) -> Result<EmptyJsonResponse, ApiError> {
+    state
+        .api()?
+        .session()
+        .torrent_creation_manager
+        .cancel(id)
+        .context("error cancelling")?;
+    Ok(Default::default())
+}
+
+#[tauri::command]
+async fn torrent_create_task_delete(
+    state: tauri::State<'_, State>,
+    id: usize,
+) -> Result<EmptyJsonResponse, ApiError> {
+    state.api()?.session().torrent_creation_manager.cleanup(id);
+    Ok(Default::default())
+}
+
+#[tauri::command]
+async fn torrent_list_extra_files(
+    state: tauri::State<'_, State>,
+    id: TorrentIdOrHash,
+) -> Result<ListExtraFilesResponse, ApiError> {
+    state.api()?.api_list_extra_files(id)
+}
+
+#[tauri::command]
+async fn torrent_delete_extra_files(
+    state: tauri::State<'_, State>,
+    id: TorrentIdOrHash,
+    files: Vec<String>,
+) -> Result<DeleteExtraFilesResponse, ApiError> {
+    state.api()?.api_delete_extra_files(id, files)
 }
 
 fn main() {
@@ -465,3 +767,4 @@ fn main() {
         .expect("couldn't set up tokio runtime")
         .block_on(start())
 }
+// force rebuild 8

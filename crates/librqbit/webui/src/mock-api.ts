@@ -13,6 +13,7 @@ import {
   TorrentListItem,
   LiveTorrentStats,
   TorrentFile,
+  CreateTorrentTask,
 } from "./api-types";
 
 // Torrent name templates for variety
@@ -260,14 +261,14 @@ function generateLiveStats(
     time_remaining:
       etaSecs !== null
         ? {
-            human_readable:
-              etaSecs < 60
-                ? `${Math.floor(etaSecs)}s`
-                : etaSecs < 3600
-                  ? `${Math.floor(etaSecs / 60)}m`
-                  : `${Math.floor(etaSecs / 3600)}h ${Math.floor((etaSecs % 3600) / 60)}m`,
-            duration: { secs: Math.floor(etaSecs) },
-          }
+          human_readable:
+            etaSecs < 60
+              ? `${Math.floor(etaSecs)}s`
+              : etaSecs < 3600
+                ? `${Math.floor(etaSecs / 60)}m`
+                : `${Math.floor(etaSecs / 3600)}h ${Math.floor((etaSecs % 3600) / 60)}m`,
+          duration: { secs: Math.floor(etaSecs) },
+        }
         : null,
   };
 }
@@ -290,6 +291,7 @@ function generateTorrentStats(id: number): TorrentStats {
     error: state === "error" ? "Connection timed out" : null,
     file_progress: fileProgress,
     progress_bytes: progressBytes,
+    total_fetched_bytes: progressBytes, // Mock assumption
     finished,
     initializing_paused: state === "initializing" && id % 2 === 0,
     total_bytes: totalBytes,
@@ -542,6 +544,10 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
     throw { text: "Upload not supported in mock mode", status: 501 };
   },
 
+  createTorrent: async (): Promise<AddTorrentResponse> => {
+    throw { text: "Create torrent not supported in mock mode", status: 501 };
+  },
+
   updateOnlyFiles: async (): Promise<void> => {
     await new Promise((r) => setTimeout(r, 100));
   },
@@ -602,5 +608,33 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
 
   setLimits: async (): Promise<void> => {
     await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 50));
+  },
+
+  createTorrentTask: async (): Promise<number> => {
+    throw { text: "Create torrent task not supported in mock mode", status: 501 };
+  },
+
+  listCreateTorrentTasks: async (): Promise<CreateTorrentTask[]> => {
+    return [];
+  },
+
+  cancelCreateTorrentTask: async (): Promise<void> => {
+    throw { text: "Cancel task not supported in mock mode", status: 501 };
+  },
+
+  deleteCreateTorrentTask: async (): Promise<void> => {
+    throw { text: "Delete task not supported in mock mode", status: 501 };
+  },
+
+  listExtraFiles: async (): Promise<{ extra_files: string[] }> => {
+    return { extra_files: ["desktop.ini", "Thumbs.db", "screenshot_001.png"] };
+  },
+
+  removeExtraFiles: async (
+    _index: number,
+    files: string[],
+  ): Promise<{ removed: number; failed: number }> => {
+    return { removed: files.length, failed: 0 };
   },
 };

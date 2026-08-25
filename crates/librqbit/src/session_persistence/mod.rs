@@ -30,6 +30,12 @@ pub struct SerializedTorrent {
     output_folder: PathBuf,
     only_files: Option<Vec<usize>>,
     is_paused: bool,
+    #[serde(default)]
+    pub added_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub total_fetched_bytes: u64,
+    #[serde(default)]
+    pub last_activity: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SerializedTorrent {
@@ -59,6 +65,9 @@ impl SerializedTorrent {
             ),
             only_files: self.only_files,
             overwrite: true,
+            added_at: self.added_at,
+            total_fetched_bytes: Some(self.total_fetched_bytes),
+            last_activity: self.last_activity,
             ..Default::default()
         };
 

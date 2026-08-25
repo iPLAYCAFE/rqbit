@@ -86,6 +86,13 @@ impl ListenerOptions {
         utp_opts.parent_span = parent_span;
         utp_opts.dont_wait_for_lastack = true;
 
+        // Default to 1400 to avoid WSAEMSGSIZE (error 10040) on networks with
+        // MTU < 1500 (PPPoE, VPN, VLAN). The uTP MTU probing will still
+        // binary-search upward if the link supports larger packets.
+        if utp_opts.link_mtu.is_none() {
+            utp_opts.link_mtu = std::num::NonZeroUsize::new(1400);
+        }
+
         let mut listen_addr = if self.ipv4_only {
             if self.listen_addr.is_ipv6() && self.listen_addr.ip().is_unspecified() {
                 // Force to IPv4 unspecified if IPv6 unspecified was requested but we are v4 only

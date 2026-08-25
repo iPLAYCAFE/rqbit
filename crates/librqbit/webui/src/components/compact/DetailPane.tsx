@@ -8,16 +8,27 @@ import { FilesTab } from "./FilesTab";
 import { PeersTab } from "./PeersTab";
 import { TabButton, TabList } from "../Tabs";
 
+
 type TabId = "overview" | "files" | "peers";
 
-export const DetailPane: React.FC = () => {
+export const DetailPane: React.FC<{ torrentId?: number }> = ({ torrentId }) => {
   const selectedTorrentIds = useUIStore((state) => state.selectedTorrentIds);
   const [activeTab, setActiveTab] = useState<TabId>("overview");
 
   const selectedArray = Array.from(selectedTorrentIds);
-  const selectedCount = selectedArray.length;
+  // Use prop if available, otherwise check global selection
+  const effectiveId = torrentId ?? (selectedArray.length === 1 ? selectedArray[0] : undefined);
 
-  if (selectedCount === 0) {
+
+
+  if (!effectiveId) {
+    if (selectedArray.length > 1) {
+      return (
+        <div className="h-full border-t border-divider bg-surface-raised flex items-center justify-center">
+          <p className="text-tertiary">{selectedArray.length} torrents selected</p>
+        </div>
+      );
+    }
     return (
       <div className="h-full border-t border-divider bg-surface-raised flex items-center justify-center">
         <p className="text-tertiary">Select a torrent to view details</p>
@@ -25,42 +36,36 @@ export const DetailPane: React.FC = () => {
     );
   }
 
-  if (selectedCount > 1) {
-    return (
-      <div className="h-full border-t border-divider bg-surface-raised flex items-center justify-center">
-        <p className="text-tertiary">{selectedCount} torrents selected</p>
-      </div>
-    );
-  }
-
-  const selectedId = selectedArray[0];
+  const selectedId = effectiveId;
 
   return (
-    <div className="h-full border-t border-divider flex flex-col bg-surface">
-      <TabList className="bg-surface-raised">
-        <TabButton
-          id="overview"
-          label="Overview"
-          active={activeTab === "overview"}
-          onClick={() => setActiveTab("overview")}
-        />
-        <TabButton
-          id="files"
-          label="Files"
-          active={activeTab === "files"}
-          onClick={() => setActiveTab("files")}
-        />
-        <TabButton
-          id="peers"
-          label="Peers"
-          active={activeTab === "peers"}
-          onClick={() => setActiveTab("peers")}
-        />
-      </TabList>
-      <div className="flex-1 overflow-auto">
-        <DetailPaneContent torrentId={selectedId} activeTab={activeTab} />
+    <>
+      <div className="h-full border-t border-divider flex flex-col bg-surface">
+        <TabList className="bg-surface-raised">
+          <TabButton
+            id="overview"
+            label="Overview"
+            active={activeTab === "overview"}
+            onClick={() => setActiveTab("overview")}
+          />
+          <TabButton
+            id="files"
+            label="Files"
+            active={activeTab === "files"}
+            onClick={() => setActiveTab("files")}
+          />
+          <TabButton
+            id="peers"
+            label="Peers"
+            active={activeTab === "peers"}
+            onClick={() => setActiveTab("peers")}
+          />
+        </TabList>
+        <div className="flex-1 overflow-auto">
+          <DetailPaneContent torrentId={selectedId} activeTab={activeTab} />
+        </div>
       </div>
-    </div>
+    </>
   );
 };
 
@@ -75,6 +80,8 @@ const DetailPaneContent: React.FC<DetailPaneContentProps> = ({
 }) => {
   const API = useContext(APIContext);
   const [fetchDetails, setFetchDetails] = useState(false);
+
+
 
   // Get torrent and details from store
   const torrent = useTorrentStore((state) =>
@@ -91,7 +98,6 @@ const DetailPaneContent: React.FC<DetailPaneContentProps> = ({
     setFetchDetails(true);
   }, [activeTab, torrentId, cachedDetails]);
 
-  // Fetch details when requested
   useEffect(() => {
     if (!fetchDetails) return;
     return loopUntilSuccess(async () => {
@@ -106,7 +112,23 @@ const DetailPaneContent: React.FC<DetailPaneContentProps> = ({
     setFetchDetails(true);
   };
 
-  const statsResponse = torrent?.stats ?? null;
+  const [fetchedStats, setFetchedStats] = useState<any>(null);
+
+  // Poll for full stats (including file_progress) when Files tab is active
+  useEffect(() => {
+    if (activeTab !== "files") return;
+
+    // Initial fetch
+    API.getTorrentStats(torrentId).then(setFetchedStats).catch(console.error);
+
+    const interval = setInterval(() => {
+      API.getTorrentStats(torrentId).then(setFetchedStats).catch(console.error);
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [activeTab, torrentId]);
+
+  const statsResponse = fetchedStats ?? torrent?.stats ?? null;
 
   return (
     <>

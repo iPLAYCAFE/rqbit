@@ -34,6 +34,7 @@ pub struct TorrentStateInitializing {
     pause_requested: AtomicBool,
     check_running: AtomicBool,
     previously_errored: bool,
+    skip_check: bool,
 }
 
 impl TorrentStateInitializing {
@@ -43,6 +44,7 @@ impl TorrentStateInitializing {
         only_files: Option<Vec<usize>>,
         files: FileStorage,
         previously_errored: bool,
+        skip_check: bool,
     ) -> Self {
         Self {
             shared,
@@ -53,6 +55,7 @@ impl TorrentStateInitializing {
             pause_requested: AtomicBool::new(false),
             check_running: AtomicBool::new(false),
             previously_errored,
+            skip_check,
         }
     }
 
@@ -207,6 +210,90 @@ impl TorrentStateInitializing {
                 .context("error loading have_pieces")?
         };
 
+        if self.skip_check {
+            // Startup integrity validation: even with skip_check, detect files modified
+            // while rqbit was shut down. This prevents seeding corrupted data.
+            // Only runs when enable_file_integrity_monitor is enabled.
+            if self.shared.options.enable_file_integrity_monitor {
+                let mut integrity_ok = true;
+
+                // 1. Quick size check: compare actual file sizes against .torrent metadata
+                let current_metadata = self.files.file_metadata().unwrap_or_default();
+                for (idx, fi) in self.metadata.file_infos.iter().enumerate() {
+                    if fi.attrs.padding {
+                        continue;
+                    }
+                    if let Some(Some((_mtime, size))) = current_metadata.get(idx)
+                        && *size != fi.len
+                    {
+                        warn!(
+                            file = %fi.relative_filename.display(),
+                            expected_size = fi.len,
+                            actual_size = size,
+                            "File size mismatch detected at startup — forcing full hash check"
+                        );
+                        integrity_ok = false;
+                        break;
+                    }
+                }
+
+                // 2. mtime check: compare file mtimes against .bitv file mtime
+                if integrity_ok {
+                    let bitv_mtime = bitv_factory.get_mtime(id).await.unwrap_or(None);
+                    if let Some(bitv_mtime) = bitv_mtime {
+                        for (idx, fi) in self.metadata.file_infos.iter().enumerate() {
+                            if fi.attrs.padding {
+                                continue;
+                            }
+                            if let Some(Some((file_mtime, _size))) = current_metadata.get(idx)
+                                && *file_mtime > bitv_mtime
+                            {
+                                warn!(
+                                    file = %fi.relative_filename.display(),
+                                    "File modified after last session — forcing full hash check"
+                                );
+                                integrity_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // If integrity check failed, pause the torrent with an error
+                if !integrity_ok {
+                    anyhow::bail!(
+                        "Files were modified while rqbit was shut down. \
+                         Torrent paused to prevent serving corrupted data. \
+                         Use Force Recheck to verify and resume."
+                    );
+                }
+            }
+
+            // Integrity OK — proceed with skip check as normal
+            use bitvec::vec::BitVec;
+            let num_bytes = self.metadata.lengths().piece_bitfield_bytes();
+            let mut bv = BitVec::<u8, bitvec::order::Msb0>::from_vec(vec![0xff; num_bytes]);
+            let _total_pieces = self.metadata.lengths().total_pieces() as usize;
+            let expected_bits = num_bytes * 8;
+            if bv.len() != expected_bits {
+                bv.resize(expected_bits, true);
+            }
+
+            let bv = bv.into_boxed_bitslice();
+
+            info!("Startup integrity check passed — skipping full hash check");
+
+            self.checked_bytes
+                .store(self.metadata.lengths().total_length(), Ordering::Relaxed);
+
+            bitv_factory
+                .store_initial_check(id, bv.clone())
+                .await
+                .context("error storing skipped check bitfield")?;
+
+            return self.finalize_check(Box::new(bv)).await;
+        }
+
         let have_pieces = self.validate_fastresume(&*bitv_factory, have_pieces).await;
 
         let have_pieces = match have_pieces {
@@ -227,7 +314,13 @@ impl TorrentStateInitializing {
                     .context("error storing initial check bitfield")?
             }
         };
+        self.finalize_check(have_pieces).await
+    }
 
+    async fn finalize_check(
+        &self,
+        have_pieces: Box<dyn crate::bitv::BitV>,
+    ) -> anyhow::Result<TorrentStatePaused> {
         let selected_pieces = compute_selected_pieces(
             self.metadata.lengths(),
             |idx| {
@@ -249,9 +342,25 @@ impl TorrentStateInitializing {
 
         let hns = chunk_tracker.get_hns();
 
+        // Sync extra files only for newly added torrents (not restored from session),
+        // when the torrent is already fully complete after hash check.
+        if self.shared.options.sync_extra_files
+            && !self.shared.options.is_restoring
+            && hns.finished()
+        {
+            use crate::sync_utils::remove_extra_files;
+            info!("Syncing extra files...");
+            if let Err(e) = remove_extra_files(
+                self.metadata.info.info(),
+                &self.shared.options.output_folder,
+            ) {
+                warn!("Error removing extra files: {:#}", e);
+            }
+        }
+
         info!(
             torrent=?self.shared.id,
-            "Initial check results: have {}, needed {}, total selected {}",
+            "Check results: have {}, needed {}, total selected {}",
             SF::new(hns.have_bytes),
             SF::new(hns.needed_bytes),
             SF::new(hns.selected_bytes)
@@ -273,11 +382,25 @@ impl TorrentStateInitializing {
                             continue;
                         }
                         if let Err(err) = self.files.ensure_file_length(idx, fi.len) {
-                            warn!(
-                                id=?self.shared.id, info_hash = ?self.shared.info_hash,
-                                "Error setting length for file {:?} to {}: {:#?}",
-                                fi.relative_filename, fi.len, err
-                            );
+                            let is_permission_denied = err
+                                .root_cause()
+                                .downcast_ref::<std::io::Error>()
+                                .map(|io_err| io_err.kind() == std::io::ErrorKind::PermissionDenied)
+                                .unwrap_or(false);
+
+                            if is_permission_denied {
+                                tracing::debug!(
+                                    id=?self.shared.id, info_hash = ?self.shared.info_hash,
+                                    "Error setting length for file {:?} to {} (read-only?): {:#?}",
+                                    fi.relative_filename, fi.len, err
+                                );
+                            } else {
+                                warn!(
+                                    id=?self.shared.id, info_hash = ?self.shared.info_hash,
+                                    "Error setting length for file {:?} to {}: {:#?}",
+                                    fi.relative_filename, fi.len, err
+                                );
+                            }
                         } else {
                             trace!(
                                 "Set length for file {:?} to {} in {:?}",

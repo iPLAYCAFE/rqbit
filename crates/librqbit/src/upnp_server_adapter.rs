@@ -565,6 +565,7 @@ mod tests {
                 AddTorrent::from_bytes(as_bytes(&t1)),
                 Some(AddTorrentOptions {
                     paused: true,
+                    output_folder: Some(td.path().join("t1").to_string_lossy().into_owned()),
                     ..Default::default()
                 }),
             )
@@ -575,6 +576,7 @@ mod tests {
                 AddTorrent::from_bytes(as_bytes(&t2)),
                 Some(AddTorrentOptions {
                     paused: true,
+                    output_folder: Some(td.path().join("t2").to_string_lossy().into_owned()),
                     ..Default::default()
                 }),
             )

@@ -1,11 +1,16 @@
-.bacon-locations
-/target
-/crates/*/target
-/crates/*/Cargo.lock
-/desktop/src-tauri/gen/
+# Local Cursor / agent tooling
+.cursor/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / generated
+node_modules/
+desktop/src-tauri/gen/
+
+# OS / editor
 .DS_Store
-/perf.data*
-/flamegraph.svg
-.claude
-.serena/
-node_modules
+Thumbs.db
+*.swp
+*~

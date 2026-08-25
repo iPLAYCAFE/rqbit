@@ -1,8 +1,8 @@
-import { JSX, useContext, useEffect, useState } from "react";
+import { JSX, useContext, useEffect, useState, useRef } from "react";
 import { ErrorDetails as ApiErrorDetails } from "./api-types";
 import { APIContext } from "./context";
 import { RootContent } from "./components/RootContent";
-import { customSetInterval } from "./helper/customSetInterval";
+import { useDocumentVisibility } from "./hooks/useDocumentVisibility";
 import { LogStreamModal } from "./components/modal/LogStreamModal";
 import { Header } from "./components/Header";
 import { useTorrentStore } from "./stores/torrentStore";
@@ -43,16 +43,22 @@ export const RqbitWebUI = (props: {
   const refreshTorrents = async (): Promise<number> => {
     setTorrentsLoading(true);
     try {
-      const response = await API.listTorrents({ withStats: true });
+      // Fetch both torrents and stats in parallel to halve API calls
+      const [response, stats] = await Promise.all([
+        API.listTorrents({ withStats: true }),
+        API.stats(),
+      ]);
+
       setTorrents(response.torrents);
+      setStats(stats);
       setOtherError(null);
 
       // Determine polling interval based on torrent states
-      // Fast poll (1s) if any torrent is live/initializing, slow poll (5s) otherwise
+      // Fast poll (2s) if any torrent is live/initializing, slow poll (5s) otherwise
       const hasActiveTorrents = response.torrents.some(
         (t) => t.stats?.state === "live" || t.stats?.state === "initializing",
       );
-      return hasActiveTorrents ? 1000 : 5000;
+      return hasActiveTorrents ? 2000 : 5000;
     } catch (e) {
       setOtherError({ text: "Error refreshing torrents", details: e as any });
       console.error(e);
@@ -69,26 +75,35 @@ export const RqbitWebUI = (props: {
     setRefreshTorrents(refreshTorrents as unknown as () => void);
   }, []);
 
-  useEffect(() => {
-    return customSetInterval(async () => refreshTorrents(), 0);
-  }, []);
+  const visible = useDocumentVisibility();
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
+  // Combined polling loop: fetches both torrents + stats in one cycle
   useEffect(() => {
-    return customSetInterval(
-      async () =>
-        API.stats().then(
-          (stats) => {
-            setStats(stats);
-            return 1000;
-          },
-          (e) => {
-            console.error(e);
-            return 5000;
-          },
-        ),
-      0,
-    );
-  }, []);
+    let mounted = true;
+    let timeoutId: number | undefined;
+
+    const loop = async () => {
+      if (!mounted) return;
+      let interval = 3000;
+      if (visibleRef.current) {
+        interval = await refreshTorrents();
+      } else {
+        interval = 10000; // Slow poll when hidden
+      }
+      if (mounted) {
+        timeoutId = window.setTimeout(loop, interval);
+      }
+    };
+
+    loop();
+
+    return () => {
+      mounted = false;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [visible]);
 
   return (
     <div className="bg-surface h-dvh flex flex-col overflow-hidden">
