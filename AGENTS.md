@@ -75,11 +75,12 @@ Workflow: `.github/workflows/test.yml`
 | `check-rust-compat` (1.94, 1.97) | `ubicloud` |
 | `test (ubicloud, linux)` | `ubicloud` |
 | `test (windows-latest, windows)` | `windows-latest` (excludes `rqbit-desktop` crate tests) |
+| `test (macos-latest, macos)` | `macos-latest` (GitHub-hosted; excludes `rqbit-desktop`) |
 | `desktop-check` | `windows-latest` (npm build + `cargo check -p rqbit-desktop`) |
 
 - Linux releases / Docker: `release-linux.yml` on Ubicloud
 - Windows release: `release-windows.yml` on `windows-latest`
-- **No macOS CI** (build locally if needed)
+- macOS release: not in CI yet (tests only on `macos-latest`)
 - Ubicloud app `ubicloud-managed-runners` installed on org `iPLAYCAFE`
 
 ## Fork features (not in upstream)

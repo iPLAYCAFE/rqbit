@@ -1,7 +1,7 @@
 name: Release binaries for Linux and Docker
 
 # Fork releases: Ubicloud Linux runners only (`ubicloud` / `ubicloud-arm`).
-# Windows releases use GitHub-hosted `windows-latest`. macOS is not built in CI on this fork.
+# Windows/macOS releases use GitHub-hosted runners (see release-windows.yml; macOS release optional).
 on:
   push:
     branches:
