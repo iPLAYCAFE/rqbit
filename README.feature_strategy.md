@@ -199,13 +199,14 @@ After re-squash, open a PR from `fork/sync-<tag>` → `main` (or temporarily loo
 
 Feature branches intended for upstream PRs should be rebased onto `upstream/main` (not fork `main`), one commit each, then force-pushed to `origin`.
 
-## CI on this fork (Ubicloud + Windows hosted)
+## CI on this fork (Ubicloud + GitHub-hosted Windows/macOS)
 
 | Job | `runs-on` | Notes |
 |---|---|---|
 | Linux check / test / Docker / Linux release | `ubicloud` / `ubicloud-arm` | Default CI path |
 | Windows test / Windows release | `windows-latest` | GitHub-hosted — Ubicloud has no Windows |
-| macOS release | not in CI | No workflow — build locally on macOS if ever needed |
+| macOS test | `macos-latest` | GitHub-hosted — Ubicloud has no macOS |
+| macOS release | not in CI | Optional later; build locally or restore `release-osx.yml` |
 
 Docs: [Quickstart](https://www.ubicloud.com/docs/github-actions-integration/quickstart), [Runner types](https://www.ubicloud.com/docs/github-actions-integration/runner-types).
 
@@ -213,6 +214,6 @@ Prerequisite: [Ubicloud Managed Runners](https://console.ubicloud.com) GitHub Ap
 
 ## Branch protection on `main`
 
-- Required status checks: all `Run tests` jobs (rust-compat ×2, Linux, Windows, desktop-check)
+- Required status checks: all `Run tests` jobs (rust-compat ×2, Linux, Windows, macOS, desktop-check)
 - Pull request required before merge (0 approvals — solo operator can self-merge after CI)
 - `enforce_admins: true` — admins must pass CI too; no force-push

@@ -1,6 +1,6 @@
 name: Run tests
 
-# Linux: Ubicloud (`ubicloud`). Windows: GitHub-hosted (`windows-latest`).
+# Linux: Ubicloud (`ubicloud`). Windows/macOS: GitHub-hosted (`windows-latest`, `macos-latest`).
 # See: https://www.ubicloud.com/docs/github-actions-integration/quickstart
 on:
   push:
@@ -40,12 +40,15 @@ jobs:
 
   test:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubicloud
             os_kind: linux
           - runner: windows-latest
             os_kind: windows
+          - runner: macos-latest
+            os_kind: macos
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +67,11 @@ jobs:
         if: matrix.os_kind == 'windows'
         # Exclude Tauri desktop: generate_context! requires frontend dist/ which CI does not build.
         run: cargo test --workspace --exclude rqbit-desktop
+
+      - name: Run tests (macOS)
+        if: matrix.os_kind == 'macos'
+        # Exclude Tauri desktop: same as Windows — frontend dist/ not built in this job.
+        run: ulimit -n unlimited && cargo test --workspace --exclude rqbit-desktop
 
   desktop-check:
     runs-on: windows-latest

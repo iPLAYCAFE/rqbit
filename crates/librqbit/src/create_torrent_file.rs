@@ -236,7 +236,6 @@ async fn create_torrent_raw(
             if remaining_piece_length == 0 {
                 remaining_piece_length = piece_length;
                 piece_hashes.extend_from_slice(&piece_checksum.finish());
-                piece_checksum = sha1w::Sha1::new();
 
                 // Update progress every piece
                 if let Some(ref tx) = progress_tx {
@@ -248,7 +247,9 @@ async fn create_torrent_raw(
                 // Yield to the runtime so that JoinHandle::abort() can
                 // take effect.  Without this, the tight read-hash loop
                 // never reaches an .await point and cannot be cancelled.
+                // Recreate Sha1 after the await (clearer for !Send hashers).
                 tokio::task::yield_now().await;
+                piece_checksum = sha1w::Sha1::new();
             }
         }
     }

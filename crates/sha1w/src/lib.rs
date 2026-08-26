@@ -4,6 +4,10 @@
 // Sha1 computation is the majority of CPU usage of librqbit.
 // openssl is 2-3x faster than rust's sha1.
 // system library is the best choice probably (it's the default anyway).
+//
+// On macOS, crypto-hash uses CommonCrypto which is !Send. Fork code holds
+// hashers across `.await` (create_torrent cancel points / tokio::spawn), so
+// macOS uses aws-lc-rs even when the `sha1-crypto-hash` feature is selected.
 
 pub trait ISha1 {
     fn new() -> Self;
@@ -30,7 +34,7 @@ assert_cfg::exactly_one! {
     feature = "sha1-ring",
 }
 
-#[cfg(feature = "sha1-crypto-hash")]
+#[cfg(all(feature = "sha1-crypto-hash", not(target_os = "macos")))]
 mod crypto_hash_impl {
     use super::{ISha1, ISha256};
 
@@ -85,7 +89,10 @@ mod crypto_hash_impl {
     }
 }
 
-#[cfg(feature = "sha1-ring")]
+#[cfg(any(
+    feature = "sha1-ring",
+    all(feature = "sha1-crypto-hash", target_os = "macos")
+))]
 mod ring_impl {
     use super::{ISha1, ISha256};
 
@@ -140,16 +147,22 @@ mod ring_impl {
     }
 }
 
-#[cfg(feature = "sha1-crypto-hash")]
+#[cfg(all(feature = "sha1-crypto-hash", not(target_os = "macos")))]
 pub type Sha1 = crypto_hash_impl::Sha1CryptoHash;
 
-#[cfg(feature = "sha1-ring")]
+#[cfg(any(
+    feature = "sha1-ring",
+    all(feature = "sha1-crypto-hash", target_os = "macos")
+))]
 pub type Sha1 = ring_impl::Sha1Ring;
 
-#[cfg(feature = "sha1-crypto-hash")]
+#[cfg(all(feature = "sha1-crypto-hash", not(target_os = "macos")))]
 pub type Sha256 = crypto_hash_impl::Sha256CryptoHash;
 
-#[cfg(feature = "sha1-ring")]
+#[cfg(any(
+    feature = "sha1-ring",
+    all(feature = "sha1-crypto-hash", target_os = "macos")
+))]
 pub type Sha256 = ring_impl::Sha256Ring;
 
 #[cfg(test)]
