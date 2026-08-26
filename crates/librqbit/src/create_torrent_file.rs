@@ -247,9 +247,7 @@ async fn create_torrent_raw(
                 // Yield to the runtime so that JoinHandle::abort() can
                 // take effect.  Without this, the tight read-hash loop
                 // never reaches an .await point and cannot be cancelled.
-                // Recreate Sha1 *after* the await: crypto-hash's hasher is
-                // !Send on macOS (CommonCrypto), so it must not be held
-                // across an await inside tokio::spawn.
+                // Recreate Sha1 after the await (clearer for !Send hashers).
                 tokio::task::yield_now().await;
                 piece_checksum = sha1w::Sha1::new();
             }
