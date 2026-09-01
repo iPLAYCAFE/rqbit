@@ -26,6 +26,10 @@ use crate::tracker_comms_udp;
 use crate::tracker_comms_udp::UdpTrackerClient;
 use librqbit_core::hash_id::Id20;
 
+const HTTP_TRACKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const HTTP_TRACKER_INITIAL_RETRY_MIN_DELAY: Duration = Duration::from_secs(2);
+const HTTP_TRACKER_RETRY_MIN_DELAY: Duration = Duration::from_secs(10);
+
 pub struct TrackerComms {
     info_hash: Id20,
     peer_id: Id20,
@@ -240,13 +244,19 @@ impl TrackerComms {
         let mut event = Some(tracker_comms_http::TrackerRequestEvent::Started);
 
         loop {
+            let min_delay = if event.is_some() {
+                HTTP_TRACKER_INITIAL_RETRY_MIN_DELAY
+            } else {
+                HTTP_TRACKER_RETRY_MIN_DELAY
+            };
+
             let interval = (|| self.tracker_one_request_http(&tracker_url, event))
                 .retry(
                     ExponentialBuilder::new()
                         .without_max_times()
                         .with_jitter()
                         .with_factor(2.)
-                        .with_min_delay(Duration::from_secs(10))
+                        .with_min_delay(min_delay)
                         .with_max_delay(Duration::from_secs(600)),
                 )
                 .notify(|err, retry_in| debug!(?retry_in, "error calling tracker: {err:#}"))
@@ -290,11 +300,20 @@ impl TrackerComms {
         }
         url.set_query(Some(&queries));
 
-        let response: reqwest::Response = self.reqwest_client.get(url).send().await?;
+        let response: reqwest::Response = self
+            .reqwest_client
+            .get(url)
+            .timeout(HTTP_TRACKER_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("HTTP tracker request to {tracker_url} failed"))?;
         if !response.status().is_success() {
             anyhow::bail!("tracker responded with {:?}", response.status());
         }
-        let bytes = response.bytes().await?;
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("error reading HTTP tracker response from {tracker_url}"))?;
         if let Ok((error, _)) =
             bencode::from_bytes_with_rest::<tracker_comms_http::TrackerError>(&bytes)
         {

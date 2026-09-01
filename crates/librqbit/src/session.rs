@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     io::Read,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
@@ -75,6 +75,38 @@ use tracker_comms::{TrackerComms, UdpTrackerClient};
 
 pub const SUPPORTED_SCHEMES: [&str; 3] = ["http:", "https:", "magnet:"];
 
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const TRACKER_HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const TRACKER_HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(15);
+
+fn base_http_client_builder(
+    proxy_url: Option<&str>,
+    bind_device_name: Option<&str>,
+    ipv4_only: bool,
+) -> anyhow::Result<reqwest::ClientBuilder> {
+    let mut builder = reqwest::Client::builder();
+
+    if let Some(proxy_url) = proxy_url {
+        let proxy =
+            reqwest::Proxy::all(proxy_url).context("error creating socks5 proxy for HTTP")?;
+        builder = builder.proxy(proxy);
+    } else {
+        #[cfg(not(windows))]
+        if let Some(bind_device_name) = bind_device_name {
+            builder = builder.interface(bind_device_name);
+        }
+    }
+
+    #[cfg(windows)]
+    let _ = bind_device_name;
+
+    if ipv4_only {
+        builder = builder.local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    Ok(builder.connect_timeout(HTTP_CONNECT_TIMEOUT))
+}
+
 pub type TorrentId = usize;
 
 struct ParsedTorrentFile {
@@ -119,6 +151,7 @@ pub struct Session {
     dht: Option<Dht>,
     pub(crate) connector: Arc<StreamConnector>,
     reqwest_client: reqwest::Client,
+    tracker_http_client: reqwest::Client,
     udp_tracker_client: UdpTrackerClient,
     disable_trackers: bool,
 
@@ -757,26 +790,27 @@ impl Session {
                 .client_name_and_version
                 .unwrap_or_else(|| crate::client_name_and_version().to_owned());
 
-            let reqwest_client = {
-                let builder = if let Some(proxy_url) = proxy_url {
-                    let proxy = reqwest::Proxy::all(proxy_url)
-                        .context("error creating socks5 proxy for HTTP")?;
-                    reqwest::Client::builder().proxy(proxy)
-                } else {
-                    #[allow(unused_mut)]
-                    let mut b = reqwest::Client::builder();
-                    #[cfg(not(windows))]
-                    if let Some(bd) = opts.bind_device_name.as_ref() {
-                        b = b.interface(bd);
-                    }
-                    b
-                };
-
-                builder
-                    .user_agent(&client_name_and_version)
-                    .build()
-                    .context("error building HTTP(S) client")?
+            let build_http_client = || {
+                base_http_client_builder(
+                    proxy_url.map(String::as_str),
+                    opts.bind_device_name.as_deref(),
+                    opts.ipv4_only,
+                )
             };
+
+            let reqwest_client = build_http_client()?
+                .user_agent(&client_name_and_version)
+                .build()
+                .context("error building HTTP(S) client")?;
+
+            let tracker_http_client = build_http_client()?
+                .user_agent(&client_name_and_version)
+                .http1_only()
+                .tcp_keepalive(TRACKER_HTTP_TCP_KEEPALIVE)
+                .pool_idle_timeout(TRACKER_HTTP_POOL_IDLE_TIMEOUT)
+                .pool_max_idle_per_host(1)
+                .build()
+                .context("error building HTTP(S) tracker client")?;
 
             let stream_connector = Arc::new(
                 StreamConnector::new(StreamConnectorArgs {
@@ -848,6 +882,7 @@ impl Session {
                 listen_addr: listen_result.as_ref().map(|l| l.addr),
                 default_storage_factory: opts.default_storage_factory,
                 reqwest_client,
+                tracker_http_client,
                 connector: stream_connector,
                 root_span: opts.root_span,
                 stats: Arc::new(SessionStats::new()),
@@ -1697,7 +1732,7 @@ impl Session {
             Box::new(tracker_rx_stats),
             force_tracker_interval,
             self.announce_port().unwrap_or(4240),
-            self.reqwest_client.clone(),
+            self.tracker_http_client.clone(),
             self.udp_tracker_client.clone(),
         );
 
