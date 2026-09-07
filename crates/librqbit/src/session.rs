@@ -1796,12 +1796,20 @@ impl Session {
         trackers: &[url::Url],
         peer_opts: Option<PeerConnectionOptions>,
     ) -> anyhow::Result<ResolveMagnetResult> {
+        let mut peer_opts = self.merge_peer_opts(peer_opts);
+        // Ensure read_write_timeout is at least 60 seconds when resolving magnet metainfo
+        // so that large game torrents with thousands of files don't get prematurely timed out.
+        peer_opts.read_write_timeout = Some(
+            peer_opts
+                .read_write_timeout
+                .map_or(Duration::from_secs(60), |d| d.max(Duration::from_secs(60))),
+        );
         match read_metainfo_from_peer_receiver(
             self.peer_id,
             info_hash,
             Default::default(),
             peer_rx,
-            Some(self.merge_peer_opts(peer_opts)),
+            Some(peer_opts),
             self.connector.clone(),
             self.client_name_and_version.clone(),
         )

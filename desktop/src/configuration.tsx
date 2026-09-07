@@ -46,6 +46,7 @@ interface RqbitDesktopConfigFeatures {
   sync_extra_files: boolean;
   permissive_file_opening: boolean;
   enable_file_integrity_monitor: boolean;
+  enable_file_logging?: boolean;
 }
 
 export interface LimitsConfig {

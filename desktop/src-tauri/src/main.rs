@@ -204,39 +204,32 @@ async fn api_from_config(
 }
 
 impl State {
-    async fn new(init_logging: InitLoggingResult) -> Self {
-        let config_path = get_config_path();
-        let config_filename = config_path.to_str().expect("to_str()").to_owned();
-
-        if config_path.exists() {
-            info!("Using config: {:?}", config_path);
+    async fn new(
+        init_logging: InitLoggingResult,
+        config_filename: String,
+        initial_config: Option<RqbitDesktopConfig>,
+    ) -> Self {
+        if Path::new(&config_filename).exists() {
+            info!("Using config: {:?}", config_filename);
         } else {
-            info!("Config not found at {:?}, using defaults", config_path);
+            info!("Config not found at {:?}, using defaults", config_filename);
         }
 
-        match read_config(&config_filename) {
-            Ok(config) => {
-                let api = api_from_config(&init_logging, &config)
-                    .await
-                    .map_err(|e| {
-                        warn!(error=?e, "error reading configuration");
-                        e
-                    })
-                    .ok();
-                let shared = Arc::new(RwLock::new(Some(StateShared { config, api })));
+        if let Some(config) = initial_config {
+            let api = api_from_config(&init_logging, &config)
+                .await
+                .map_err(|e| {
+                    warn!(error=?e, "error reading configuration");
+                    e
+                })
+                .ok();
+            let shared = Arc::new(RwLock::new(Some(StateShared { config, api })));
 
-                return Self {
-                    config_filename,
-                    shared,
-                    init_logging,
-                };
-            }
-            Err(e) => {
-                warn!(
-                    "failed reading config from {:?}: {:#}, starting unconfigured",
-                    config_filename, e
-                );
-            }
+            return Self {
+                config_filename,
+                shared,
+                init_logging,
+            };
         }
 
         Self {
@@ -471,12 +464,12 @@ fn set_limits(state: tauri::State<State>, limits: LimitsConfig) -> Result<(), Ap
 /// falling back to the platform-specific config directory.
 fn get_config_path() -> std::path::PathBuf {
     // Portable mode: check if config.json exists in the same directory as the executable
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let portable_config = exe_dir.join("config.json");
-            if portable_config.exists() {
-                return portable_config;
-            }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        let portable_config = exe_dir.join("config.json");
+        if portable_config.exists() {
+            return portable_config;
         }
     }
 
@@ -484,6 +477,16 @@ fn get_config_path() -> std::path::PathBuf {
         .expect("directories::ProjectDirs::from")
         .config_dir()
         .join("config.json")
+}
+
+fn get_log_path(config_path: &Path) -> std::path::PathBuf {
+    if let Some(log_file) = std::env::var_os("RQBIT_LOG_FILE") {
+        return std::path::PathBuf::from(log_file);
+    }
+    config_path
+        .parent()
+        .map(|p| p.join("rqbit.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("rqbit.log"))
 }
 
 async fn start() {
@@ -498,13 +501,38 @@ async fn start() {
         now
     );
 
+    let config_path = get_config_path();
+    let config_filename = config_path.to_str().expect("to_str()").to_owned();
+    let initial_config = read_config(&config_filename).ok();
+    let log_path = get_log_path(&config_path);
+    let log_path_str = log_path.to_string_lossy().to_string();
+
+    let file_logging_enabled = std::env::var_os("RQBIT_LOG_FILE").is_some()
+        || initial_config
+            .as_ref()
+            .map(|c| c.features.enable_file_logging)
+            .unwrap_or(false);
+
+    let (log_file, log_file_rust_log) = if file_logging_enabled {
+        let rust_log = std::env::var("RQBIT_LOG_FILE_RUST_LOG")
+            .ok()
+            .unwrap_or_else(|| "info,librqbit=debug,tracker_comms=debug".to_string());
+        (Some(log_path_str.as_str()), Some(rust_log))
+    } else {
+        (None, None)
+    };
+
     let init_logging_result = init_logging(InitLoggingOptions {
         default_rust_log_value: Some("info"),
-        log_file: None,
-        log_file_rust_log: None,
+        log_file,
+        log_file_rust_log: log_file_rust_log.as_deref(),
         log_file_json: false,
     })
     .unwrap();
+
+    if file_logging_enabled {
+        info!("File logging enabled, writing to {:?}", log_path);
+    }
 
     match librqbit::try_increase_nofile_limit() {
         Ok(limit) => info!(limit = limit, "increased open file limit"),
@@ -512,7 +540,7 @@ async fn start() {
     };
 
     let line_broadcast = init_logging_result.line_broadcast.clone();
-    let state = State::new(init_logging_result).await;
+    let state = State::new(init_logging_result, config_filename, initial_config).await;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -536,6 +564,8 @@ async fn start() {
 
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).ok();
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>).ok();
+            let open_logs_i =
+                MenuItem::with_id(app, "open_logs", "Open Log Folder", true, None::<&str>).ok();
             let autostart_i = CheckMenuItem::with_id(
                 app,
                 "autostart",
@@ -546,14 +576,17 @@ async fn start() {
             )
             .ok();
 
-            if let (Some(quit_i), Some(show_i), Some(autostart_i)) = (quit_i, show_i, autostart_i) {
+            if let (Some(quit_i), Some(show_i), Some(open_logs_i), Some(autostart_i)) =
+                (quit_i, show_i, open_logs_i, autostart_i)
+            {
                 // Check current autostart status
                 if let Ok(true) = app.autolaunch().is_enabled() {
                     let _ = autostart_i.set_checked(true);
                 }
 
-                let menu = Menu::with_items(app, &[&show_i, &autostart_i, &quit_i]);
+                let menu = Menu::with_items(app, &[&show_i, &open_logs_i, &autostart_i, &quit_i]);
                 if let Ok(menu) = menu {
+                    let log_path_for_tray = log_path.clone();
                     let _ = TrayIconBuilder::new()
                         .icon(app.default_window_icon().unwrap().clone())
                         .tooltip(format!("rqbit v{}", env!("RQBIT_VERSION")))
@@ -566,6 +599,35 @@ async fn start() {
                                 if let Some(window) = app.get_webview_window("main") {
                                     let _ = window.show();
                                     let _ = window.set_focus();
+                                }
+                            }
+                            "open_logs" => {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    if log_path_for_tray.exists() {
+                                        let _ = std::process::Command::new("explorer")
+                                            .arg(format!(
+                                                "/select,\"{}\"",
+                                                log_path_for_tray.display()
+                                            ))
+                                            .spawn();
+                                    } else if let Some(folder) = log_path_for_tray.parent() {
+                                        let _ = std::process::Command::new("explorer")
+                                            .arg(folder)
+                                            .spawn();
+                                    }
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    if let Some(folder) = log_path_for_tray.parent() {
+                                        #[cfg(target_os = "macos")]
+                                        let _ =
+                                            std::process::Command::new("open").arg(folder).spawn();
+                                        #[cfg(not(target_os = "macos"))]
+                                        let _ = std::process::Command::new("xdg-open")
+                                            .arg(folder)
+                                            .spawn();
+                                    }
                                 }
                             }
                             "autostart" => {
@@ -660,7 +722,7 @@ async fn torrent_create(
     trackers: Option<Vec<String>>,
 ) -> Result<ApiAddTorrentResponse, ApiError> {
     let opts = CreateTorrentOptions {
-        name: name,
+        name,
         trackers: trackers.unwrap_or_default(),
         piece_length: None,
         progress: None,
@@ -668,11 +730,7 @@ async fn torrent_create(
     let path = std::path::PathBuf::from(path);
     let api = state.api()?;
 
-    let (_meta, handle) = api
-        .session()
-        .create_and_serve_torrent(&path, opts)
-        .await
-        .map_err(ApiError::from)?;
+    let (_meta, handle) = api.session().create_and_serve_torrent(&path, opts).await?;
 
     let details = api.api_torrent_details(librqbit::api::TorrentIdOrHash::Id(handle.id()))?;
 
