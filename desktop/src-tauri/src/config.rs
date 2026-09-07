@@ -86,8 +86,8 @@ impl Default for RqbitDesktopConfigConnections {
             enable_upnp_port_forward: true,
             listen_port: 4240,
             socks_proxy: String::new(),
-            peer_connect_timeout: Duration::from_secs(2),
-            peer_read_write_timeout: Duration::from_secs(10),
+            peer_connect_timeout: Duration::from_secs(10),
+            peer_read_write_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -172,6 +172,9 @@ pub struct RqbitDesktopConfigFeatures {
 
     #[serde(default)]
     pub enable_file_integrity_monitor: bool,
+
+    #[serde(default)]
+    pub enable_file_logging: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]

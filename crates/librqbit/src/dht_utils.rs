@@ -1,10 +1,15 @@
-use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Context;
 use buffers::ByteBufOwned;
 use futures::{Stream, StreamExt, stream::FuturesUnordered};
 use librqbit_core::torrent_metainfo::TorrentMetaV1Info;
-use tracing::{Instrument, debug, debug_span};
+use tracing::{Instrument, debug, debug_span, info};
 
 use crate::{
     peer_connection::PeerConnectionOptions, peer_info_reader, spawn_utils::BlockingSpawner,
@@ -37,16 +42,21 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     client_name_and_version: String,
 ) -> ReadMetainfoResult<A> {
     let mut seen = HashSet::<SocketAddr>::new();
+    let mut in_flight = HashSet::<SocketAddr>::new();
+    let mut last_attempt = HashMap::<SocketAddr, tokio::time::Instant>::new();
+    let mut attempt_counts = HashMap::<SocketAddr, usize>::new();
     let mut addrs = addrs_stream;
 
     let semaphore = tokio::sync::Semaphore::new(128);
+    const RETRY_COOLDOWN: Duration = Duration::from_secs(5);
+    const MAX_RETRIES_AFTER_COMPLETION: usize = 6;
 
-    let read_info_guarded = |addr| {
+    let read_info_guarded = |addr: SocketAddr| {
         let semaphore = &semaphore;
         let connector = connector.clone();
         let client_name_and_version = client_name_and_version.clone();
         async move {
-            let token = semaphore.acquire().await?;
+            let token = semaphore.acquire().await.ok();
             let ret = peer_info_reader::read_metainfo_from_peer(
                 addr,
                 peer_id,
@@ -62,7 +72,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
             .await
             .with_context(|| format!("error reading metainfo from {addr}"));
             drop(token);
-            ret
+            (addr, ret)
         }
     };
 
@@ -70,6 +80,9 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
 
     for a in initial_addrs {
         seen.insert(a);
+        in_flight.insert(a);
+        last_attempt.insert(a, tokio::time::Instant::now());
+        *attempt_counts.entry(a).or_insert(0) += 1;
         unordered.push(read_info_guarded(a));
     }
 
@@ -77,16 +90,48 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
 
     loop {
         if addrs_completed && unordered.is_empty() {
-            return ReadMetainfoResult::ChannelClosed { seen };
+            let any_can_retry = seen.iter().any(|a| {
+                let attempts = attempt_counts.get(a).copied().unwrap_or(0);
+                attempts < MAX_RETRIES_AFTER_COMPLETION
+            });
+            if !any_can_retry {
+                return ReadMetainfoResult::ChannelClosed { seen };
+            }
         }
+
+        let now = tokio::time::Instant::now();
+        let next_retry_at = seen
+            .iter()
+            .filter(|a| !in_flight.contains(a))
+            .filter(|a| {
+                if addrs_completed {
+                    let attempts = attempt_counts.get(a).copied().unwrap_or(0);
+                    attempts < MAX_RETRIES_AFTER_COMPLETION
+                } else {
+                    true
+                }
+            })
+            .map(|a| match last_attempt.get(a) {
+                Some(t) => *t + RETRY_COOLDOWN,
+                None => now,
+            })
+            .min();
+
+        let has_retry = next_retry_at.is_some();
+        let sleep_until = next_retry_at.unwrap_or(now + Duration::from_secs(86400));
 
         tokio::select! {
             done = unordered.next(), if !unordered.is_empty() => {
                 match done {
-                    Some(Ok((info, info_bytes))) => return ReadMetainfoResult::Found { info, info_bytes, seen, rx: addrs },
-                    Some(Err(e)) => {
-                        debug!("{:#}", e);
-                    },
+                    Some((addr, Ok((info, info_bytes)))) => {
+                        info!(?addr, "successfully fetched metainfo from peer");
+                        return ReadMetainfoResult::Found { info, info_bytes, seen, rx: addrs };
+                    }
+                    Some((addr, Err(e))) => {
+                        debug!(?addr, "failed reading metainfo from peer: {:#}", e);
+                        in_flight.remove(&addr);
+                        last_attempt.insert(addr, tokio::time::Instant::now());
+                    }
                     None => unreachable!()
                 }
             }
@@ -94,14 +139,46 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
             next_addr = addrs.next(), if !addrs_completed => {
                 match next_addr {
                     Some(addr) => {
-                        if seen.insert(addr) {
-                            unordered.push(read_info_guarded(addr));
+                        seen.insert(addr);
+                        if !in_flight.contains(&addr) {
+                            let can_start = match last_attempt.get(&addr) {
+                                Some(t) => t.elapsed() >= RETRY_COOLDOWN,
+                                None => true,
+                            };
+                            if can_start {
+                                in_flight.insert(addr);
+                                last_attempt.insert(addr, tokio::time::Instant::now());
+                                *attempt_counts.entry(addr).or_insert(0) += 1;
+                                unordered.push(read_info_guarded(addr));
+                            }
                         }
-                        continue;
-                    },
+                    }
                     None => {
                         addrs_completed = true;
-                    },
+                    }
+                }
+            }
+
+            _ = tokio::time::sleep_until(sleep_until), if has_retry => {
+                let now = tokio::time::Instant::now();
+                for &a in &seen {
+                    if !in_flight.contains(&a) {
+                        let attempts = attempt_counts.get(&a).copied().unwrap_or(0);
+                        if addrs_completed && attempts >= MAX_RETRIES_AFTER_COMPLETION {
+                            continue;
+                        }
+                        let can_retry = match last_attempt.get(&a) {
+                            Some(t) => now.duration_since(*t) >= RETRY_COOLDOWN,
+                            None => true,
+                        };
+                        if can_retry {
+                            in_flight.insert(a);
+                            last_attempt.insert(a, now);
+                            *attempt_counts.entry(a).or_insert(0) += 1;
+                            debug!(?a, "retrying peer for metainfo");
+                            unordered.push(read_info_guarded(a));
+                        }
+                    }
                 }
             }
         };
